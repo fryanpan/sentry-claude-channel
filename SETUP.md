@@ -13,12 +13,18 @@ Set environment variables before running:
 
 | var | required | default | meaning |
 |---|---|---|---|
-| `SENTRY_CLIENT_SECRET` | yes (prod) | — | Sentry integration's Client Secret. Used to verify webhook signatures. If unset, the receiver runs in **dev mode** with no signature verification. |
+| `SENTRY_CLIENT_SECRET` | yes (prod) | — | Sentry integration's Client Secret. Used to verify webhook signatures. If unset, the receiver runs in **dev mode** with no signature verification. **Stored in macOS Keychain** — service `sentry-channel-client-secret`, account `$USER`. Don't hard-code it; load via the launcher pattern below. |
 | `SENTRY_RECEIVER_PORT` | no | `7903` | HTTP port for the receiver. |
 | `SENTRY_CHANNEL_DB` | no | `~/.sentry-channel.db` | SQLite subscription store path. |
 | `CLAUDE_HIVE_URL` | no | `http://127.0.0.1:7900` | claude-hive broker URL. |
 
-Run:
+Run via the launcher script (reads secret from Keychain, no plaintext on disk):
+
+```bash
+./scripts/run-receiver.sh
+```
+
+Or directly for dev (signature verification disabled):
 
 ```bash
 bun receiver.ts
@@ -30,7 +36,28 @@ Verify it's healthy:
 curl -s http://127.0.0.1:7903/health   # → "ok"
 ```
 
-In production, run under launchd (mirror `notion-channel-mcp/launchd/notion-channel.cloudflared.plist`).
+### Storing the Sentry Client Secret in Keychain
+
+```bash
+security add-generic-password \
+  -U \
+  -s 'sentry-channel-client-secret' \
+  -a "$USER" \
+  -w '<the-secret-from-sentry-integration>' \
+  -j 'Sentry Internal Integration Client Secret for sentry-claude-channel receiver.'
+```
+
+Verify (does NOT print the value):
+
+```bash
+security find-generic-password -s 'sentry-channel-client-secret' -a "$USER" -j
+```
+
+To rotate: re-run the `add-generic-password` command above with the new value. The `-U` flag updates if the entry already exists.
+
+### Production: launchd
+
+Mirror `notion-channel-mcp/launchd/notion-channel.cloudflared.plist`. Have the plist exec `scripts/run-receiver.sh` rather than embedding env vars (so the plist file itself contains no secrets).
 
 ## 2. Cloudflare tunnel for the public webhook URL
 
