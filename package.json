@@ -1,0 +1,21 @@
+{
+  "name": "sentry-claude-channel",
+  "version": "0.1.0",
+  "description": "Sentry issue events as Claude Code channel notifications. Routes Sentry webhooks to subscribed Claude Code sessions via claude-hive.",
+  "license": "MIT",
+  "type": "module",
+  "module": "server.ts",
+  "private": true,
+  "scripts": {
+    "receiver": "bun receiver.ts",
+    "server": "bun server.ts",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^6.0.2"
+  }
+}

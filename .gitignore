@@ -1,0 +1,11 @@
+node_modules/
+*.log
+.DS_Store
+.env
+.env.local
+.dev.vars
+*.db
+*.db-shm
+*.db-wal
+.claude/worktrees/
+.claude/plans/
