@@ -1,0 +1,17 @@
+{
+  "name": "sentry-claude-channel",
+  "owner": {
+    "name": "Bryan Chan",
+    "url": "https://github.com/fryanpan"
+  },
+  "description": "Sentry issue events delivered to subscribed Claude Code sessions as channel notifications.",
+  "plugins": [
+    {
+      "name": "sentry-claude-channel",
+      "source": ".",
+      "description": "MCP tools (watch/unwatch/list) + PreToolUse auto-approve hook for plugin-owned operations (incl. launchctl with service labels).",
+      "version": "0.1.0",
+      "homepage": "https://github.com/fryanpan/sentry-claude-channel"
+    }
+  ]
+}
