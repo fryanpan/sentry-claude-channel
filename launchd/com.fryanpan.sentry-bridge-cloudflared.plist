@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>sentry-bridge.cloudflared</string>
+  <string>com.fryanpan.sentry-bridge-cloudflared</string>
 
   <key>ProgramArguments</key>
   <array>

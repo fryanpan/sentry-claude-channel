@@ -17,6 +17,41 @@ When a new Sentry issue fires (or an existing one changes status), the receiver 
 - `shared/stable-id.ts` — workspace stable-id derivation (matches claude-hive's scheme).
 - `shared/types.ts` — Sentry webhook payload + subscription types.
 
+## Install
+
+### As a Claude Code plugin (recommended)
+
+This repo is a Claude Code plugin. Install it via the standard plugin flow — the MCP server and a PreToolUse auto-approve hook ship together, so you don't have to hand-edit `~/.claude.json` per session:
+
+```bash
+# Add this checkout as a local plugin marketplace
+claude plugin marketplace add /Users/bryanchan/dev/sentry-claude-channel
+
+# Install the plugin from that marketplace
+claude plugin install sentry-claude-channel@sentry-claude-channel
+```
+
+The plugin registers an MCP server named `sentry-claude-channel` (exposing the `sentry_*` tools) and a PreToolUse hook that auto-approves the plugin's own MCP tools + a narrow allowlist of receiver lifecycle commands (`./scripts/run-receiver.sh`, `bun receiver.ts`, and `launchctl` ops scoped to the `com.fryanpan.sentry-channel-receiver` / `com.fryanpan.sentry-bridge-cloudflared` service labels).
+
+You still need to set up the receiver daemon, the Sentry integration, and the Cloudflare tunnel once per machine — see [SETUP.md](./SETUP.md).
+
+### As a raw MCP entry (fallback)
+
+If you prefer to wire up the MCP server manually (e.g. you're on a Claude Code version without plugin support, or you don't want the auto-approve hook), add the server directly to your `.mcp.json` or `~/.claude.json`:
+
+```json
+{
+  "mcpServers": {
+    "sentry-claude-channel": {
+      "command": "bun",
+      "args": ["/Users/bryanchan/dev/sentry-claude-channel/server.ts"]
+    }
+  }
+}
+```
+
+You'll then be prompted to approve each `mcp__sentry-claude-channel__*` tool the first time Claude Code uses it.
+
 ## Quick start
 
 ```bash
@@ -25,8 +60,7 @@ bun install
 # Start the receiver (one per machine; manage via launchd in production)
 bun receiver.ts
 
-# The MCP server starts automatically per Claude Code session if registered
-# in your .mcp.json. From a Claude Code session, use:
+# From a Claude Code session, once the plugin (or raw MCP entry) is installed:
 #   sentry_watch_project(project_slug="bike-map", min_level="warning")
 ```
 
