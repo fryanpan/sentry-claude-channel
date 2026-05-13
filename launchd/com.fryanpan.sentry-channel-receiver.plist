@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.fryanpan.sentry-channel-receiver</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>HOME_DIR/dev/sentry-claude-channel/scripts/run-receiver.sh</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/bryanchan/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>HOME</key>
+    <string>HOME_DIR</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>HOME_DIR/dev/sentry-claude-channel</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardErrorPath</key>
+  <string>HOME_DIR/Library/Logs/sentry-channel-receiver.log</string>
+  <key>StandardOutPath</key>
+  <string>HOME_DIR/Library/Logs/sentry-channel-receiver.log</string>
+</dict>
+</plist>

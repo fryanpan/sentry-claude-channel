@@ -31,7 +31,7 @@ claude plugin marketplace add /Users/bryanchan/dev/sentry-claude-channel
 claude plugin install sentry-claude-channel@sentry-claude-channel
 ```
 
-The plugin registers an MCP server named `sentry-claude-channel` (exposing the `sentry_*` tools) and a PreToolUse hook that auto-approves the plugin's own MCP tools + a narrow allowlist of receiver lifecycle commands (`./scripts/run-receiver.sh`, `bun receiver.ts`, and `launchctl` ops scoped to the `sentry-channel.receiver` / `sentry-bridge.cloudflared` service labels).
+The plugin registers an MCP server named `sentry-claude-channel` (exposing the `sentry_*` tools) and a PreToolUse hook that auto-approves the plugin's own MCP tools + a narrow allowlist of receiver lifecycle commands (`./scripts/run-receiver.sh`, `bun receiver.ts`, and `launchctl` ops scoped to the `com.fryanpan.sentry-channel-receiver` / `com.fryanpan.sentry-bridge-cloudflared` service labels).
 
 You still need to set up the receiver daemon, the Sentry integration, and the Cloudflare tunnel once per machine — see [SETUP.md](./SETUP.md).
 

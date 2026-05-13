@@ -26,8 +26,8 @@
  *        - `bun receiver.ts` / `bun server.ts` (raw foreground processes)
  *        - `bun run receiver` / `bun run server` (package.json scripts)
  *        - `launchctl {bootstrap,bootout,kickstart,print,list}` against the
- *          plugin's service labels `sentry-channel.receiver` and
- *          `sentry-bridge.cloudflared`
+ *          plugin's service labels `com.fryanpan.sentry-channel-receiver` and
+ *          `com.fryanpan.sentry-bridge-cloudflared`
  *      Anything else falls through to Claude Code's normal prompt.
  *
  * Everything outside the plugin's domain (file writes outside the project,
@@ -64,8 +64,8 @@ const MCP_PREFIX = 'mcp__plugin_sentry-claude-channel_sentry-claude-channel__';
  * labels, so a `launchctl print` for someone else's service still prompts.
  */
 const SERVICE_LABELS = [
-  'sentry-channel.receiver',
-  'sentry-bridge.cloudflared',
+  'com.fryanpan.sentry-channel-receiver',
+  'com.fryanpan.sentry-bridge-cloudflared',
 ];
 
 /**
