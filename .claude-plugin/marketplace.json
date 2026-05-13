@@ -8,7 +8,7 @@
   "plugins": [
     {
       "name": "sentry-claude-channel",
-      "source": ".",
+      "source": "./",
       "description": "MCP tools (watch/unwatch/list) + PreToolUse auto-approve hook for plugin-owned operations (incl. launchctl with service labels).",
       "version": "0.1.0",
       "homepage": "https://github.com/fryanpan/sentry-claude-channel"
