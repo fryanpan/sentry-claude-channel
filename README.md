@@ -17,6 +17,20 @@ When a new Sentry issue fires (or an existing one changes status), the receiver 
 - `shared/stable-id.ts` — workspace stable-id derivation (matches claude-hive's scheme).
 - `shared/types.ts` — Sentry webhook payload + subscription types.
 
+## Requirements
+
+[bun](https://bun.sh) — the server uses `bun:sqlite` and other Bun APIs, so node is not a
+substitute. You do not need bun on your `PATH`: the plugin ships a `/bin/sh` launcher that
+finds bun itself, so it works in sessions started by launchd, a GUI app, or cron, where
+your shell profile never runs.
+
+Optional overrides (`SENTRY_RECEIVER_PORT`, `CLAUDE_HIVE_URL`, `SENTRY_CHANNEL_DB`) go in
+`~/.config/sentry-claude-channel/env`, which the launcher sources at startup. Keep them
+there rather than inside the plugin directory — the plugin cache is keyed by version, so
+each release installs into a fresh directory and anything written inside is orphaned by
+the next upgrade. `SENTRY_CLIENT_SECRET` is not needed by the MCP server; the receiver
+reads it from macOS Keychain (see [SETUP.md](./SETUP.md)).
+
 ## Install
 
 ### As a Claude Code plugin (recommended)
