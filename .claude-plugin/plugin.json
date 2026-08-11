@@ -1,6 +1,6 @@
 {
   "name": "sentry-claude-channel",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Sentry issue events delivered to subscribed Claude Code sessions as channel notifications",
   "channels": [
     {
@@ -9,8 +9,11 @@
   ],
   "mcpServers": {
     "sentry-claude-channel": {
-      "command": "bun",
-      "args": ["./server.ts"]
+      "command": "/bin/sh",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/bin/sentry-channel-mcp.sh",
+        "${CLAUDE_PLUGIN_ROOT}/server.ts"
+      ]
     }
   }
 }
