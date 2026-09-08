@@ -130,3 +130,55 @@ Default `min_level` is `warning`. Pass `min_level="error"` if you only want erro
 - **Receiver returns 403:** signature verification failed. Confirm `SENTRY_CLIENT_SECRET` matches the integration's actual Client Secret. Check Sentry's webhook delivery logs (Integrations → your integration → Dashboard) for the raw body Sentry sent vs what the receiver received.
 - **Webhook arrives but no peer gets the message:** check `~/.sentry-channel.db` — `SELECT * FROM subscriptions;` should show the expected row. Also confirm claude-hive is alive: `curl -s http://127.0.0.1:7900/health`.
 - **Peer subscribed but events still missing:** the channel-push to idle Claude Code sessions is silently dropped (Claude Code GitHub issue [#40800](https://github.com/anthropics/claude-code/issues/40800)). The peer needs to call `check_messages` (claude-hive tool) at the start of its next turn to drain queued events.
+
+## Installing the receiver as a LaunchAgent
+
+**Deploy to the boot disk. Not to a home-directory path you have not resolved.**
+
+A process spawned by launchd gets `Operation not permitted` on a secondary
+volume — on exec, on read, even on stat — unless its own executable holds Full
+Disk Access, and `/bin/bash` does not. `~/dev` and `~/.bun` are commonly
+symlinks onto another volume, in which case the resolved path is what launchd
+uses and the job dies at exec. `launchctl list` still shows it loaded, and
+`KeepAlive` restarts it every `ThrottleInterval` seconds forever, so the
+failure is only visible in the log.
+
+Pick a deploy root and a bun that are both genuinely on the boot disk, and
+confirm it rather than assuming:
+
+```bash
+DEPLOY_ROOT=/opt/fleet/sentry-channel      # /opt is boot disk and is not shadowed by a symlink
+BUN_BIN_DIR=/path/to/a/boot-disk/bun/bin
+
+readlink -f "$DEPLOY_ROOT"  && df "$DEPLOY_ROOT"
+readlink -f "$BUN_BIN_DIR/bun" && df "$BUN_BIN_DIR/bun"
+```
+
+Then deploy, fill in the template, and load it:
+
+```bash
+rsync -a --exclude='.git' ./ "$DEPLOY_ROOT/"
+
+sed -e "s|DEPLOY_ROOT|$DEPLOY_ROOT|g" \
+    -e "s|BUN_BIN_DIR|$BUN_BIN_DIR|g" \
+    -e "s|HOME_DIR|$HOME|g" \
+    launchd/com.fryanpan.sentry-channel-receiver.plist \
+    > ~/Library/LaunchAgents/com.fryanpan.sentry-channel-receiver.plist
+
+launchctl bootstrap "gui/$(id -u)" \
+  ~/Library/LaunchAgents/com.fryanpan.sentry-channel-receiver.plist
+```
+
+**Verify it is serving, not merely loaded.** These are different states, and
+only the first two lines below distinguish them:
+
+```bash
+curl -s localhost:7903/health                      # expect: ok
+lsof -nP -iTCP:7903 -sTCP:LISTEN                   # expect: the receiver's pid
+launchctl print "gui/$(id -u)/com.fryanpan.sentry-channel-receiver" | grep -E 'state|pid'
+tail -5 ~/Library/Logs/sentry-channel-receiver.log
+```
+
+When reading that log, check the timestamp against the current time. It is
+append-only across restarts, so a healthy-looking line near the end can be
+from a previous run.

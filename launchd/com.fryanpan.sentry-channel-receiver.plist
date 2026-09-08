@@ -1,5 +1,29 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Substitute before installing:
+
+    DEPLOY_ROOT   where this repo is deployed. It MUST be on the boot disk.
+    BUN_BIN_DIR   directory holding a bun binary that is ALSO on the boot disk.
+    HOME_DIR      the user's home directory.
+
+  Every path a LaunchAgent touches has to be on the boot disk. A process
+  spawned by launchd gets "Operation not permitted" on a secondary volume --
+  on exec, on read, even on stat -- unless its own executable holds Full Disk
+  Access. /bin/bash does not.
+
+  A home-directory path is NOT evidence of the boot disk. If ~/dev or ~/.bun
+  is a symlink onto another volume, the resolved path is what launchd uses,
+  and the job dies at exec while looking correctly configured. That is what
+  happened here: the job restarted on the 10s ThrottleInterval for weeks,
+  logging one "Operation not permitted" per attempt, and every surface that
+  reported on it said the LaunchAgent was loaded.
+
+  Check both before installing:
+
+    readlink -f DEPLOY_ROOT && df DEPLOY_ROOT
+    readlink -f BUN_BIN_DIR/bun && df BUN_BIN_DIR/bun
+-->
 <plist version="1.0">
 <dict>
   <key>Label</key>
@@ -7,19 +31,19 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>HOME_DIR/dev/sentry-claude-channel/scripts/run-receiver.sh</string>
+    <string>DEPLOY_ROOT/scripts/run-receiver.sh</string>
   </array>
 
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>/Users/bryanchan/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <string>BUN_BIN_DIR:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     <key>HOME</key>
     <string>HOME_DIR</string>
   </dict>
 
   <key>WorkingDirectory</key>
-  <string>HOME_DIR/dev/sentry-claude-channel</string>
+  <string>DEPLOY_ROOT</string>
 
   <key>RunAtLoad</key>
   <true/>
