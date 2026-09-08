@@ -27,7 +27,8 @@ import {
   removeSubscription,
   listSubscriptionsFor,
 } from "./shared/db.ts";
-import { computeStableId } from "./shared/stable-id.ts";
+import { listPeers } from "./shared/hive.ts";
+import { resolveSubscriberId, sessionCwd } from "./shared/session-id.ts";
 import type { SentryLevel } from "./shared/types.ts";
 
 const VALID_LEVELS: readonly SentryLevel[] = [
@@ -38,10 +39,24 @@ const VALID_LEVELS: readonly SentryLevel[] = [
   "fatal",
 ];
 
-const myStableId = computeStableId(process.cwd());
+/**
+ * Which session is calling. NOT derived from process.cwd() — see
+ * shared/session-id.ts for why that was wrong and silent.
+ */
+async function subscriberId(args: unknown) {
+  return resolveSubscriberId({
+    explicitStableId: (args as { stable_id?: string } | undefined)?.stable_id,
+    cwd: sessionCwd(),
+    listPeers,
+  });
+}
+
+function errorResult(text: string) {
+  return { isError: true as const, content: [{ type: "text" as const, text }] };
+}
 
 const server = new Server(
-  { name: "sentry-claude-channel", version: "0.1.0" },
+  { name: "sentry-claude-channel", version: "0.3.0" },
   {
     capabilities: { tools: {} },
     instructions: `You have access to the sentry-claude-channel tools. Use them to subscribe to Sentry projects whose new issues you want to see as channel events.
@@ -72,6 +87,11 @@ const TOOLS = [
           description:
             'Minimum severity level to receive events for. Defaults to "warning" (warning/error/fatal will surface; debug/info will not).',
         },
+        stable_id: {
+          type: "string" as const,
+          description:
+            "Override the session this applies to, as a 12-hex-char claude-hive stable id (claude-hive's whoami tool reports it). Only needed when the session cannot be identified automatically — the tool says so when that happens.",
+        },
       },
       required: ["project_slug"],
     },
@@ -87,6 +107,11 @@ const TOOLS = [
           type: "string" as const,
           description: "The Sentry project slug to unsubscribe from.",
         },
+        stable_id: {
+          type: "string" as const,
+          description:
+            "Override the session this applies to, as a 12-hex-char claude-hive stable id (claude-hive's whoami tool reports it). Only needed when the session cannot be identified automatically — the tool says so when that happens.",
+        },
       },
       required: ["project_slug"],
     },
@@ -97,7 +122,13 @@ const TOOLS = [
       "List all Sentry project subscriptions for this workspace. Returns project slug, min_level, and creation timestamp for each.",
     inputSchema: {
       type: "object" as const,
-      properties: {},
+      properties: {
+        stable_id: {
+          type: "string" as const,
+          description:
+            "Override the session this applies to, as a 12-hex-char claude-hive stable id (claude-hive's whoami tool reports it). Only needed when the session cannot be identified automatically — the tool says so when that happens.",
+        },
+      },
     },
   },
 ];
@@ -114,28 +145,24 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         (args as { min_level?: string }).min_level ?? "warning",
       ).toLowerCase() as SentryLevel;
       if (!projectSlug) {
-        return {
-          isError: true,
-          content: [{ type: "text" as const, text: "project_slug is required" }],
-        };
+        return errorResult("project_slug is required");
       }
       if (!VALID_LEVELS.includes(minLevelInput)) {
-        return {
-          isError: true,
-          content: [
-            {
-              type: "text" as const,
-              text: `min_level must be one of: ${VALID_LEVELS.join(", ")}`,
-            },
-          ],
-        };
+        return errorResult(`min_level must be one of: ${VALID_LEVELS.join(", ")}`);
       }
-      addSubscription(myStableId, projectSlug, minLevelInput);
+      const who = await subscriberId(args);
+      if (!who.ok) return errorResult(who.error);
+      addSubscription(who.stableId, projectSlug, minLevelInput);
       return {
         content: [
           {
             type: "text" as const,
-            text: `Subscribed to Sentry project '${projectSlug}' (min_level=${minLevelInput}, peer_stable_id=${myStableId}).`,
+            text:
+              `Subscribed to Sentry project '${projectSlug}' (min_level=${minLevelInput}).\n` +
+              `Events will be addressed to stable_id ${who.stableId}` +
+              (who.source === "explicit"
+                ? " (passed explicitly)."
+                : ` — the live claude-hive peer at ${who.matchedCwd}.`),
           },
         ],
       };
@@ -144,12 +171,11 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     case "sentry_unwatch_project": {
       const projectSlug = String((args as { project_slug?: string }).project_slug ?? "").trim();
       if (!projectSlug) {
-        return {
-          isError: true,
-          content: [{ type: "text" as const, text: "project_slug is required" }],
-        };
+        return errorResult("project_slug is required");
       }
-      const removed = removeSubscription(myStableId, projectSlug);
+      const who = await subscriberId(args);
+      if (!who.ok) return errorResult(who.error);
+      const removed = removeSubscription(who.stableId, projectSlug);
       return {
         content: [
           {
@@ -163,13 +189,31 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     }
 
     case "sentry_list_my_watches": {
-      const subs = listSubscriptionsFor(myStableId);
+      const who = await subscriberId(args);
+      if (!who.ok) return errorResult(who.error);
+
+      // Show the id each row is ADDRESSED TO, and whether a live session holds
+      // it. A misfiled row is otherwise invisible: the tool used to report the
+      // id it had just looked up under, which always agreed with itself.
+      let live = false;
+      try {
+        live = (await listPeers()).some((p) => p.stable_id === who.stableId);
+      } catch {
+        live = false;
+      }
+
+      const subs = listSubscriptionsFor(who.stableId);
+      const header =
+        `Subscriptions addressed to stable_id ${who.stableId}` +
+        (who.source === "explicit" ? " (passed explicitly)" : ` (this session, cwd ${who.matchedCwd})`) +
+        (live ? " — a live claude-hive peer holds this id." : " — WARNING: no live claude-hive peer holds this id, so events sent to it will not arrive.");
+
       if (subs.length === 0) {
         return {
           content: [
             {
               type: "text" as const,
-              text: `No active subscriptions for stable_id ${myStableId}. Use sentry_watch_project to add one.`,
+              text: `${header}\n\nNo active subscriptions. Use sentry_watch_project to add one.`,
             },
           ],
         };
@@ -177,24 +221,16 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       const lines = subs
         .map(
           (s) =>
-            `- ${s.project_slug} (min_level=${s.min_level}, since ${s.created_at})`,
+            `- ${s.project_slug} (min_level=${s.min_level}, since ${s.created_at}) -> ${s.peer_stable_id}`,
         )
         .join("\n");
       return {
-        content: [
-          {
-            type: "text" as const,
-            text: `Active subscriptions for stable_id ${myStableId}:\n${lines}`,
-          },
-        ],
+        content: [{ type: "text" as const, text: `${header}\n${lines}` }],
       };
     }
 
     default:
-      return {
-        isError: true,
-        content: [{ type: "text" as const, text: `unknown tool: ${name}` }],
-      };
+      return errorResult(`unknown tool: ${name}`);
   }
 });
 

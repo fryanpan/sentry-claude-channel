@@ -1,6 +1,6 @@
 {
   "name": "sentry-claude-channel",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "Sentry issue events as Claude Code channel notifications. Routes Sentry webhooks to subscribed Claude Code sessions via claude-hive.",
   "license": "MIT",
   "type": "module",

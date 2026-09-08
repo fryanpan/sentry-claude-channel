@@ -1,6 +1,6 @@
 {
   "name": "sentry-claude-channel",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Sentry issue events delivered to subscribed Claude Code sessions as channel notifications",
   "channels": [
     {

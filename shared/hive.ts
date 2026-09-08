@@ -10,6 +10,7 @@
  */
 
 import type { StableId } from "./types.ts";
+import type { HivePeer } from "./session-id.ts";
 
 const HIVE_URL = process.env.CLAUDE_HIVE_URL ?? "http://127.0.0.1:7900";
 const HEALTH_TIMEOUT_MS = 2000;
@@ -63,6 +64,18 @@ export async function sendMessage(opts: {
     to_stable_id: opts.to_stable_id,
     text: opts.text,
   });
+}
+
+/**
+ * Every peer the broker currently considers alive. The broker prunes dead
+ * sessions as it answers, so an id absent from this list has no session
+ * behind it — which is the only reliable "undeliverable" signal available:
+ * /send-message accepts a message for an unknown stable_id and returns ok,
+ * and a message's `delivered` flag stays 0 until the recipient acks, so a
+ * live-but-busy peer looks identical to a nonexistent one.
+ */
+export async function listPeers(): Promise<HivePeer[]> {
+  return postJson<HivePeer[]>("/list-peers", { scope: "machine" });
 }
 
 export async function heartbeat(id: string): Promise<void> {
