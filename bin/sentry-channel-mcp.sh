@@ -41,6 +41,17 @@
 
 set -u
 
+# Hand the session's cwd to the server BEFORE we leave it.
+#
+# This is the whole reason subscriptions used to be misfiled. The cd below
+# means the server's own process.cwd() is the plugin's install directory, the
+# same for every session on the machine — so deriving the subscriber's identity
+# from it addressed every session's events to one id that belonged to no
+# session. The server matches this value against claude-hive's live peer list
+# and refuses to guess when it cannot; see shared/session-id.ts.
+SENTRY_CHANNEL_SESSION_CWD="$(pwd -P 2>/dev/null || pwd)"
+export SENTRY_CHANNEL_SESSION_CWD
+
 entrypoint="${1:-}"
 if [ -z "$entrypoint" ]; then
   echo "sentry-channel-mcp: no entrypoint given (expected server.ts as \$1)" >&2
@@ -105,9 +116,17 @@ if [ -n "$config_home" ] && [ -r "$config_home/sentry-claude-channel/env" ]; the
   . "$config_home/sentry-claude-channel/env"
 fi
 
-# A seam for the test: prove resolution works without starting a stdio server.
+# Seams for the tests: prove resolution and cwd capture work without starting
+# a stdio server.
 if [ "${SENTRY_CHANNEL_MCP_PRINT_BUN:-}" = "1" ]; then
   echo "$bun_bin"
+  exit 0
+fi
+if [ "${SENTRY_CHANNEL_MCP_PRINT_SESSION_CWD:-}" = "1" ]; then
+  # Read it back from a CHILD process, so the seam proves the variable is
+  # exported and not merely assigned. Printing "$SENTRY_CHANNEL_SESSION_CWD"
+  # here would pass just as happily with the export deleted.
+  sh -c 'echo "${SENTRY_CHANNEL_SESSION_CWD:-<not-exported>}"'
   exit 0
 fi
 

@@ -13,7 +13,7 @@
  */
 
 import { findMatchingPeers } from "./shared/db.ts";
-import { sendMessage, registerPeer, heartbeat } from "./shared/hive.ts";
+import { sendMessage, registerPeer, heartbeat, listPeers } from "./shared/hive.ts";
 import type { SentryIssueWebhook, SentryLevel } from "./shared/types.ts";
 
 const PORT = parseInt(process.env.SENTRY_RECEIVER_PORT ?? "7903", 10);
@@ -88,7 +88,30 @@ function formatIssueMessage(payload: SentryIssueWebhook): string {
   ].join("\n");
 }
 
-async function handleWebhook(req: Request): Promise<Response> {
+/**
+ * Split matched subscribers into those a live session can actually receive,
+ * and those addressed to an id no session holds.
+ *
+ * This exists because every other signal lies. claude-hive's /send-message
+ * inserts the row and returns ok for an unknown stable_id, and a message's
+ * `delivered` flag stays 0 until the recipient acks it — so a live peer that
+ * has not polled yet is indistinguishable from a peer that does not exist.
+ * The broker's live peer list is the one thing that separates them.
+ */
+export function classifyMatches(
+  matches: readonly string[],
+  livePeerStableIds: readonly string[],
+): { deliverable: string[]; undeliverable: string[] } {
+  const live = new Set(livePeerStableIds);
+  const deliverable: string[] = [];
+  const undeliverable: string[] = [];
+  for (const id of matches) {
+    (live.has(id) ? deliverable : undeliverable).push(id);
+  }
+  return { deliverable, undeliverable };
+}
+
+export async function handleWebhook(req: Request): Promise<Response> {
   const rawBody = await req.text();
   const signature = req.headers.get("Sentry-Hook-Signature");
   const resourceType = req.headers.get("Sentry-Hook-Resource"); // "issue" | "event_alert" | "metric_alert" | etc.
@@ -118,14 +141,42 @@ async function handleWebhook(req: Request): Promise<Response> {
     return new Response("ok", { status: 200 });
   }
 
-  // Match subscribers
+  // Match subscribers. Note `issue_level`, not `level`: the extra fields are
+  // spread over the log record, so a key called `level` overwrote the log
+  // level itself and every match line came out labelled "error".
   const matches = findMatchingPeers(issue.project.slug, issue.level as SentryLevel);
+
+  let livePeerIds: string[] | null = null;
+  try {
+    livePeerIds = (await listPeers()).map((p) => p.stable_id);
+  } catch (err) {
+    log("warn", "could not list claude-hive peers — cannot tell deliverable from not", {
+      err: String(err),
+    });
+  }
+  const { deliverable, undeliverable } =
+    livePeerIds === null
+      ? { deliverable: [...matches], undeliverable: [] as string[] }
+      : classifyMatches(matches, livePeerIds);
+
   log("info", "webhook matched", {
     action: payload.action,
     project: issue.project.slug,
-    level: issue.level,
+    issue_level: issue.level,
     matched_peers: matches.length,
+    deliverable_peers: deliverable.length,
   });
+
+  // An undeliverable match is a broken subscription, not a quiet no-op. The
+  // message is still queued (a session that comes back with the same id will
+  // get it), but it is reported as an error so a misfiled row is visible.
+  for (const to_stable_id of undeliverable) {
+    log("error", "undeliverable subscriber — no live claude-hive peer holds this stable_id", {
+      to_stable_id,
+      project: issue.project.slug,
+      hint: "the subscription is misfiled or its session is gone; re-run sentry_watch_project from the session that wants these events",
+    });
+  }
 
   if (matches.length === 0 || !myPeerId) {
     return new Response("ok", { status: 200 });
@@ -177,6 +228,11 @@ async function startHeartbeat(): Promise<void> {
   }, 30_000);
 }
 
+/** Test seam: the receiver must have a hive peer id before it can fan out. */
+export function __setPeerIdForTest(id: string | null): void {
+  myPeerId = id;
+}
+
 async function main() {
   await ensureRegistered();
   await startHeartbeat();
@@ -198,7 +254,11 @@ async function main() {
   log("info", `sentry-claude-channel receiver listening on :${PORT}`);
 }
 
-main().catch((err) => {
-  log("error", "receiver failed to start", { err: String(err) });
-  process.exit(1);
-});
+// Guarded so the module can be imported by tests without binding a port or
+// registering a second bridge peer with claude-hive.
+if (import.meta.main) {
+  main().catch((err) => {
+    log("error", "receiver failed to start", { err: String(err) });
+    process.exit(1);
+  });
+}

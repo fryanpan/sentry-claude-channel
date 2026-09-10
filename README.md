@@ -8,13 +8,16 @@ Mirrors the architecture of [notion-channel-mcp](https://github.com/fryanpan/not
 
 When a new Sentry issue fires (or an existing one changes status), the receiver daemon looks up which Claude Code peers are subscribed to that project, and pushes the event to each via claude-hive. Subscriptions persist across session restarts because they're keyed on the workspace stable_id.
 
+That id is taken from claude-hive's own live peer list rather than computed here. The MCP server runs from the plugin's install directory, not the session's, so its `process.cwd()` names no session at all — deriving an id from it addressed every session's events to the same nonexistent peer, and nothing reported a failure because the broker accepts a message for an unknown id. The launcher passes the session's cwd, the server matches it against the broker's live peers, and it returns an error naming the directory it tried rather than guessing when no peer owns it.
+
 ## Architecture
 
 - `receiver.ts` — long-running HTTP daemon. Receives Sentry webhook POSTs at `/webhook`, verifies HMAC signature, fan-outs to subscribed peers via claude-hive `/send-message`. Runs behind a Cloudflare tunnel at `sentry-bridge.fryanpan.com`.
 - `server.ts` — per-Claude-session MCP server. Provides `sentry_watch_project`, `sentry_unwatch_project`, `sentry_list_my_watches` tools.
 - `shared/db.ts` — SQLite subscription store at `~/.sentry-channel.db` (WAL mode; receiver and MCP server both open it).
 - `shared/hive.ts` — thin HTTP client for the claude-hive broker.
-- `shared/stable-id.ts` — workspace stable-id derivation (matches claude-hive's scheme).
+- `shared/session-id.ts` — works out which session is calling, from the cwd the launcher captured plus claude-hive's live peer list. Refuses rather than guessing.
+- `scripts/remap-subscriptions.ts` — one-off repair for rows filed under a wrong id (dry-run by default).
 - `shared/types.ts` — Sentry webhook payload + subscription types.
 
 ## Requirements
