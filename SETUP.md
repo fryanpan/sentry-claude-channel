@@ -122,7 +122,12 @@ Default `min_level` is `warning`. Pass `min_level="error"` if you only want erro
 ## 5. Verification
 
 1. Trigger a test event in Sentry (e.g., manually capture an exception in the watched project).
-2. Watch the receiver log — should see `webhook matched` with `matched_peers` ≥ 1.
+2. Watch the receiver log — should see `webhook matched` with **`deliverable_peers` ≥ 1**.
+   `matched_peers` counts subscription rows that matched; `deliverable_peers` counts the ones whose
+   stable_id a live claude-hive peer actually holds. Those two diverge exactly when a subscription is
+   misfiled, so checking `matched_peers` alone can read ≥ 1 while nothing was delivered — which is the
+   blind spot this step exists to catch. An undeliverable match is also logged separately at `error`
+   level naming the offending `to_stable_id`.
 3. The watching peer should see a `<channel source="claude-hive">` block within seconds containing the issue title, level, culprit, and Sentry permalink.
 
 ## Troubleshooting
