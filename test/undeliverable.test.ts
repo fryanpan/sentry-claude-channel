@@ -16,6 +16,7 @@ import { join } from "node:path";
 
 const DB_PATH = join(mkdtempSync(join(tmpdir(), "sentry-recv-")), "subs.db");
 process.env.SENTRY_CHANNEL_DB = DB_PATH;
+process.env.SENTRY_CLIENT_SECRET = "test-client-secret";
 
 let livePeers: Array<{ id: string; stable_id: string; cwd: string; git_root: string | null }> = [];
 let sent: Array<{ to_stable_id: string }> = [];
@@ -57,24 +58,37 @@ afterEach(() => {
   brokerReachable = true;
 });
 
-function webhookRequest(level = "error"): Request {
+async function webhookRequest(level = "error"): Promise<Request> {
+  const body = JSON.stringify({
+    action: "created",
+    data: {
+      issue: {
+        id: "1",
+        shortId: "CW-1",
+        title: "TypeError: nope",
+        level,
+        culprit: "board.ts",
+        permalink: "https://example.invalid/issue/1",
+        project: { id: "9", slug: "claude-workspaces", name: "claude-workspaces" },
+      },
+    },
+  });
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    enc.encode(process.env.SENTRY_CLIENT_SECRET!),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, enc.encode(body));
+  const signature = Array.from(new Uint8Array(sig))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
   return new Request("http://localhost/webhook", {
     method: "POST",
-    headers: { "Sentry-Hook-Resource": "issue" },
-    body: JSON.stringify({
-      action: "created",
-      data: {
-        issue: {
-          id: "1",
-          shortId: "CW-1",
-          title: "TypeError: nope",
-          level,
-          culprit: "board.ts",
-          permalink: "https://example.invalid/issue/1",
-          project: { id: "9", slug: "claude-workspaces", name: "claude-workspaces" },
-        },
-      },
-    }),
+    headers: { "Sentry-Hook-Resource": "issue", "Sentry-Hook-Signature": signature },
+    body,
   });
 }
 
@@ -116,7 +130,7 @@ describe("classifyMatches", () => {
 
 describe("the receiver's webhook handler", () => {
   it("logs an error naming the subscriber no live session holds", async () => {
-    const lines = await capture(webhookRequest());
+    const lines = await capture(await webhookRequest());
     const bad = lines.filter((l) => l.msg === "undeliverable subscriber — no live claude-hive peer holds this stable_id");
     expect(bad).toHaveLength(1);
     expect(bad[0]!.level).toBe("error");
@@ -124,13 +138,13 @@ describe("the receiver's webhook handler", () => {
   });
 
   it("does not report the live subscriber as undeliverable", async () => {
-    const lines = await capture(webhookRequest());
+    const lines = await capture(await webhookRequest());
     const ids = lines.filter((l) => l.msg?.toString().startsWith("undeliverable")).map((l) => l.to_stable_id);
     expect(ids).not.toContain(LIVE_ID);
   });
 
   it("counts deliverable peers separately from matched peers", async () => {
-    const lines = await capture(webhookRequest());
+    const lines = await capture(await webhookRequest());
     const matched = lines.find((l) => l.msg === "webhook matched")!;
     expect(matched.matched_peers).toBe(2);
     expect(matched.deliverable_peers).toBe(1);
@@ -139,19 +153,19 @@ describe("the receiver's webhook handler", () => {
   it("labels the match line at info level, with the issue's own severity kept separate", async () => {
     // `level` used to be spread over the record and overwrite the log level,
     // so every match line in production reads "error".
-    const matched = (await capture(webhookRequest("warning"))).find((l) => l.msg === "webhook matched")!;
+    const matched = (await capture(await webhookRequest("warning"))).find((l) => l.msg === "webhook matched")!;
     expect(matched.level).toBe("info");
     expect(matched.issue_level).toBe("warning");
   });
 
   it("still queues the message for the orphaned id, so a returning session gets it", async () => {
-    await capture(webhookRequest());
+    await capture(await webhookRequest());
     expect(sent.map((s) => s.to_stable_id).sort()).toEqual([ORPHAN_ID, LIVE_ID].sort());
   });
 
   it("warns instead of claiming everything is fine when the broker cannot be asked", async () => {
     brokerReachable = false;
-    const lines = await capture(webhookRequest());
+    const lines = await capture(await webhookRequest());
     expect(lines.some((l) => l.level === "warn" && String(l.msg).includes("could not list"))).toBe(true);
   });
 });

@@ -13,7 +13,7 @@ Set environment variables before running:
 
 | var | required | default | meaning |
 |---|---|---|---|
-| `SENTRY_CLIENT_SECRET` | yes (prod) | — | Sentry integration's Client Secret. Used to verify webhook signatures. If unset, the receiver runs in **dev mode** with no signature verification. **Stored in macOS Keychain** — service `sentry-channel-client-secret`, account `$USER`. Don't hard-code it; load via the launcher pattern below. |
+| `SENTRY_CLIENT_SECRET` | yes | — | Sentry integration's Client Secret. Used to verify webhook signatures. If unset, the receiver logs an error at startup and rejects every webhook with 403. **Stored in macOS Keychain** — service `sentry-channel-client-secret`, account `$USER`. Don't hard-code it; load via the launcher pattern below. |
 | `SENTRY_RECEIVER_PORT` | no | `7903` | HTTP port for the receiver. |
 | `SENTRY_CHANNEL_DB` | no | `~/.sentry-channel.db` | SQLite subscription store path. |
 | `CLAUDE_HIVE_URL` | no | `http://127.0.0.1:7900` | claude-hive broker URL. |
