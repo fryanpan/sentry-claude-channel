@@ -17,7 +17,6 @@ import { sendMessage, registerPeer, heartbeat, listPeers } from "./shared/hive.t
 import type { SentryIssueWebhook, SentryLevel } from "./shared/types.ts";
 
 const PORT = parseInt(process.env.SENTRY_RECEIVER_PORT ?? "7903", 10);
-const SENTRY_CLIENT_SECRET = process.env.SENTRY_CLIENT_SECRET ?? "";
 const RECEIVER_STABLE_ID = "sentry-bridge"; // fixed identifier in claude-hive
 const RECEIVER_PEER_ID_FILE = `${process.env.HOME ?? ""}/.sentry-channel-peer-id`;
 
@@ -30,25 +29,30 @@ function log(level: "info" | "warn" | "error", msg: string, extra?: Record<strin
   else console.log(line);
 }
 
+/** The Sentry Client Secret, or "" when unset or only whitespace. */
+function clientSecret(): string {
+  return (process.env.SENTRY_CLIENT_SECRET ?? "").trim();
+}
+
 /**
  * Verify Sentry's webhook signature.
  *
  * Sentry signs the raw request body with HMAC-SHA256 using the integration's
  * Client Secret. Header: `Sentry-Hook-Signature`. We compare in constant time.
  *
+ * Fails closed: with no secret set, no request can be verified, so every
+ * request is rejected. main() logs that once at startup.
+ *
  * Docs: https://docs.sentry.io/organization/integrations/integration-platform/webhooks/#verifying-the-signature
  */
 async function verifySignature(rawBody: string, signature: string | null): Promise<boolean> {
-  if (!SENTRY_CLIENT_SECRET) {
-    log("warn", "SENTRY_CLIENT_SECRET not set — skipping signature verification (dev mode)");
-    return true;
-  }
-  if (!signature) return false;
+  const secret = clientSecret();
+  if (!secret || !signature) return false;
 
   const enc = new TextEncoder();
   const key = await crypto.subtle.importKey(
     "raw",
-    enc.encode(SENTRY_CLIENT_SECRET),
+    enc.encode(secret),
     { name: "HMAC", hash: "SHA-256" },
     false,
     ["sign"],
@@ -234,6 +238,9 @@ export function __setPeerIdForTest(id: string | null): void {
 }
 
 async function main() {
+  if (!clientSecret()) {
+    log("error", "SENTRY_CLIENT_SECRET is not set — every webhook will be rejected with 403 until it is set and the receiver restarts");
+  }
   await ensureRegistered();
   await startHeartbeat();
 
