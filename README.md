@@ -74,8 +74,9 @@ You'll then be prompted to approve each `mcp__sentry-claude-channel__*` tool the
 ```bash
 bun install
 
-# Start the receiver (one per machine; manage via launchd in production)
-bun receiver.ts
+# Start the receiver (one per machine; manage via launchd in production).
+# It needs SENTRY_CLIENT_SECRET; the launcher reads it from Keychain.
+./scripts/run-receiver.sh
 
 # From a Claude Code session, once the plugin (or raw MCP entry) is installed:
 #   sentry_watch_project(project_slug="bike-map", min_level="warning")

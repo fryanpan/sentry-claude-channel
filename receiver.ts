@@ -29,6 +29,11 @@ function log(level: "info" | "warn" | "error", msg: string, extra?: Record<strin
   else console.log(line);
 }
 
+/** The Sentry Client Secret, or "" when unset or only whitespace. */
+function clientSecret(): string {
+  return (process.env.SENTRY_CLIENT_SECRET ?? "").trim();
+}
+
 /**
  * Verify Sentry's webhook signature.
  *
@@ -41,7 +46,7 @@ function log(level: "info" | "warn" | "error", msg: string, extra?: Record<strin
  * Docs: https://docs.sentry.io/organization/integrations/integration-platform/webhooks/#verifying-the-signature
  */
 async function verifySignature(rawBody: string, signature: string | null): Promise<boolean> {
-  const secret = process.env.SENTRY_CLIENT_SECRET ?? "";
+  const secret = clientSecret();
   if (!secret || !signature) return false;
 
   const enc = new TextEncoder();
@@ -233,7 +238,7 @@ export function __setPeerIdForTest(id: string | null): void {
 }
 
 async function main() {
-  if (!process.env.SENTRY_CLIENT_SECRET) {
+  if (!clientSecret()) {
     log("error", "SENTRY_CLIENT_SECRET is not set — every webhook will be rejected with 403 until it is set and the receiver restarts");
   }
   await ensureRegistered();

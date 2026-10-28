@@ -51,8 +51,13 @@ describe("webhook signature check", () => {
     expect((await handleWebhook(request(await sign(BODY, "wrong")))).status).toBe(403);
   });
 
+  it("rejects a request when the secret is only whitespace", async () => {
+    process.env.SENTRY_CLIENT_SECRET = "  ";
+    expect((await handleWebhook(request(await sign(BODY, "  ")))).status).toBe(403);
+  });
+
   it("accepts a correctly signed request", async () => {
     process.env.SENTRY_CLIENT_SECRET = SECRET;
-    expect((await handleWebhook(request(await sign(BODY, SECRET)))).status).not.toBe(403);
+    expect((await handleWebhook(request(await sign(BODY, SECRET)))).status).toBe(200);
   });
 });

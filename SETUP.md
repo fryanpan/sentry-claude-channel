@@ -24,7 +24,7 @@ Run via the launcher script (reads secret from Keychain, no plaintext on disk):
 ./scripts/run-receiver.sh
 ```
 
-Or directly for dev (signature verification disabled):
+Or directly, with `SENTRY_CLIENT_SECRET` already in the environment (without it, every webhook is rejected with 403):
 
 ```bash
 bun receiver.ts
