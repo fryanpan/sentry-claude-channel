@@ -156,9 +156,6 @@ const upsertRouteStmt = db.prepare(`
 const deleteRouteStmt = db.prepare(`DELETE FROM board_routes WHERE project_slug = ?`);
 const getRouteStmt = db.prepare(`SELECT * FROM board_routes WHERE project_slug = ?`);
 const listRoutesStmt = db.prepare(`SELECT * FROM board_routes ORDER BY project_slug`);
-const getFiledStmt = db.prepare(
-  `SELECT task_id FROM filed_issues WHERE issue_id = ? AND workspace_id = ?`,
-);
 const putFiledStmt = db.prepare(`
   INSERT INTO filed_issues (issue_id, workspace_id, task_id, created_at) VALUES (?, ?, ?, ?)
   ON CONFLICT(issue_id, workspace_id) DO UPDATE SET task_id = excluded.task_id
@@ -187,11 +184,114 @@ export function listBoardRoutes(): BoardRoute[] {
   return listRoutesStmt.all() as BoardRoute[];
 }
 
-export function filedTaskFor(issueId: string, workspaceId: string): string | null {
-  const row = getFiledStmt.get(issueId, workspaceId) as { task_id: string } | null;
-  return row?.task_id ?? null;
-}
-
 export function recordFiledTask(issueId: string, workspaceId: string, taskId: string): void {
   putFiledStmt.run(issueId, workspaceId, taskId, new Date().toISOString());
+}
+
+// ── Claims and retries for board filing ─────────────────────────────────────
+//
+// A filed_issues row whose task_id is CLAIM_PENDING marks a create in flight.
+// One older than CLAIM_TTL_MS is from a receiver that died mid-create and is
+// ignored. CLAIM_UNKNOWN marks a create that was sent but never answered: the
+// board may hold the task, so nothing files that issue again.
+
+export const CLAIM_PENDING = "pending";
+export const CLAIM_UNKNOWN = "unknown";
+const CLAIM_TTL_MS = 10 * 60 * 1000;
+
+const claimStmt = db.prepare(`
+  INSERT INTO filed_issues (issue_id, workspace_id, task_id, created_at) VALUES (?, ?, '${CLAIM_PENDING}', ?)
+  ON CONFLICT(issue_id, workspace_id) DO UPDATE SET task_id = '${CLAIM_PENDING}', created_at = excluded.created_at
+  WHERE filed_issues.task_id = '${CLAIM_PENDING}' AND filed_issues.created_at < ?
+`);
+const getFiledRowStmt = db.prepare(
+  `SELECT task_id, created_at FROM filed_issues WHERE issue_id = ? AND workspace_id = ?`,
+);
+const forgetStmt = db.prepare(`DELETE FROM filed_issues WHERE issue_id = ? AND workspace_id = ?`);
+const releaseStmt = db.prepare(
+  `DELETE FROM filed_issues WHERE issue_id = ? AND workspace_id = ? AND task_id = '${CLAIM_PENDING}'`,
+);
+const countSinceStmt = db.prepare(
+  `SELECT COUNT(*) AS n FROM filed_issues WHERE workspace_id = ? AND created_at >= ?`,
+);
+
+/**
+ * The task an issue was filed as, CLAIM_PENDING while a create is in flight,
+ * CLAIM_UNKNOWN if a create went unanswered, or null if it was never filed.
+ */
+export function filedState(issueId: string, workspaceId: string): string | null {
+  const row = getFiledRowStmt.get(issueId, workspaceId) as { task_id: string; created_at: string } | null;
+  if (!row) return null;
+  if (row.task_id === CLAIM_PENDING && Date.parse(row.created_at) < Date.now() - CLAIM_TTL_MS) return null;
+  return row.task_id;
+}
+
+/** Claim an issue for a create. False if another live claim or a task holds it. */
+export function claimIssue(issueId: string, workspaceId: string): boolean {
+  const now = new Date();
+  const staleBefore = new Date(now.getTime() - CLAIM_TTL_MS).toISOString();
+  return (claimStmt.run(issueId, workspaceId, now.toISOString(), staleBefore).changes ?? 0) > 0;
+}
+
+/** Drop a claim whose create certainly saved nothing. */
+export function releaseClaim(issueId: string, workspaceId: string): void {
+  releaseStmt.run(issueId, workspaceId);
+}
+
+/** Mark a create that was sent but never answered. */
+export function markUnknown(issueId: string, workspaceId: string): void {
+  recordFiledTask(issueId, workspaceId, CLAIM_UNKNOWN);
+}
+
+/** Forget an issue's task, e.g. after the task was deleted on the board. */
+export function forgetFiledTask(issueId: string, workspaceId: string): void {
+  forgetStmt.run(issueId, workspaceId);
+}
+
+/** How many issues were filed or claimed on a board since a time (epoch ms). */
+export function countFiledSince(workspaceId: string, sinceMs: number): number {
+  return (countSinceStmt.get(workspaceId, new Date(sinceMs).toISOString()) as { n: number }).n;
+}
+
+db.run(`
+  CREATE TABLE IF NOT EXISTS pending_filings (
+    issue_id TEXT NOT NULL,
+    project_slug TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    attempts INTEGER NOT NULL,
+    next_at INTEGER NOT NULL,
+    last_error TEXT,
+    PRIMARY KEY (issue_id, project_slug)
+  )
+`);
+
+export interface PendingFiling {
+  issue_id: string;
+  project_slug: string;
+  payload: string;
+  attempts: number;
+  next_at: number;
+  last_error: string | null;
+}
+
+const queueStmt = db.prepare(`
+  INSERT INTO pending_filings (issue_id, project_slug, payload, attempts, next_at, last_error)
+  VALUES (?, ?, ?, ?, ?, ?)
+  ON CONFLICT(issue_id, project_slug) DO UPDATE SET
+    payload = excluded.payload, attempts = excluded.attempts,
+    next_at = excluded.next_at, last_error = excluded.last_error
+`);
+const dueStmt = db.prepare(`SELECT * FROM pending_filings WHERE next_at <= ? ORDER BY next_at`);
+const dequeueStmt = db.prepare(`DELETE FROM pending_filings WHERE issue_id = ? AND project_slug = ?`);
+
+export function queueFiling(f: PendingFiling): void {
+  queueStmt.run(f.issue_id, f.project_slug, f.payload, f.attempts, f.next_at, f.last_error);
+}
+
+export function dueFilings(nowMs: number): PendingFiling[] {
+  return dueStmt.all(nowMs) as PendingFiling[];
+}
+
+export function dequeueFiling(issueId: string, projectSlug: string): void {
+  dequeueStmt.run(issueId, projectSlug);
 }

@@ -65,7 +65,7 @@ const server = new Server(
     capabilities: { tools: {} },
     instructions: `You have access to the sentry-claude-channel tools. Use them to subscribe to Sentry projects whose new issues you want to see as channel events.
 
-- On startup, if your workspace owns a Sentry project (one of the projects in https://bryans-team.sentry.io/projects/), call \`sentry_watch_project\` once with the project slug. Default min_level is \"warning\" — fatal/error/warning will surface, info/debug will not.
+- On startup, if your workspace owns a Sentry project (a project in your Sentry organization), call \`sentry_watch_project\` once with the project slug. Default min_level is \"warning\" — fatal/error/warning will surface, info/debug will not.
 - Subscriptions persist across session restarts (they're keyed on your workspace stable_id), so you don't have to re-subscribe every session. Use \`sentry_list_my_watches\` first to see your current set.
 - Inbound Sentry events arrive as <channel source="claude-hive" ...> messages. They contain the project slug, level, title, culprit, event/user counts, and a permalink to the Sentry issue. Treat them as peer taps — investigate promptly.
 `,
@@ -83,7 +83,7 @@ const TOOLS = [
         project_slug: {
           type: "string" as const,
           description:
-            'The Sentry project slug (e.g. "bike-map", "ht-worker", "fryanpan_website"). See https://bryans-team.sentry.io/projects/ for the canonical list.',
+            'The Sentry project slug, as shown in the Sentry project list (e.g. "my-app").',
         },
         min_level: {
           type: "string" as const,

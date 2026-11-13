@@ -61,17 +61,17 @@ Mirror `notion-channel-mcp/launchd/notion-channel.cloudflared.plist`. Have the p
 
 ## 2. Cloudflare tunnel for the public webhook URL
 
-Sentry needs to reach the receiver from the internet. Use a Cloudflare tunnel that maps `sentry-bridge.fryanpan.com` → `http://127.0.0.1:7903`.
+Sentry needs to reach the receiver from the internet. Use a Cloudflare tunnel that maps `<bridge-hostname>` → `http://127.0.0.1:7903`.
 
 ```bash
-cloudflared tunnel route dns <tunnel-name> sentry-bridge.fryanpan.com
+cloudflared tunnel route dns <tunnel-name> <bridge-hostname>
 ```
 
 Add the route to your tunnel config (`~/.cloudflared/config.yml`):
 
 ```yaml
 ingress:
-  - hostname: sentry-bridge.fryanpan.com
+  - hostname: <bridge-hostname>
     service: http://localhost:7903
   - service: http_status:404
 ```
@@ -79,7 +79,7 @@ ingress:
 Restart cloudflared. Verify externally:
 
 ```bash
-curl -s https://sentry-bridge.fryanpan.com/health   # → "ok"
+curl -s https://<bridge-hostname>/health   # → "ok"
 ```
 
 ## 3. Sentry webhook configuration
@@ -87,7 +87,7 @@ curl -s https://sentry-bridge.fryanpan.com/health   # → "ok"
 Create a Sentry **Internal Integration** (Settings → Developer Settings → New Internal Integration):
 
 - **Name:** `Claude channel bridge` (or similar)
-- **Webhook URL:** `https://sentry-bridge.fryanpan.com/webhook`
+- **Webhook URL:** `https://<bridge-hostname>/webhook`
 - **Permissions:** `Issue & Event: Read` (minimum)
 - **Webhooks:** check `issue` (and any others you want — `event_alert`, `metric_alert`)
 - **Save** → copy the **Client Secret**.
@@ -103,7 +103,7 @@ In your Claude Code session, register the MCP server (if not already in `.mcp.js
   "mcpServers": {
     "sentry-claude-channel": {
       "command": "bun",
-      "args": ["/Users/bryanchan/dev/sentry-claude-channel/server.ts"]
+      "args": ["/path/to/sentry-claude-channel/server.ts"]
     }
   }
 }
@@ -112,7 +112,7 @@ In your Claude Code session, register the MCP server (if not already in `.mcp.js
 Then from any Claude Code session, run:
 
 ```
-sentry_watch_project(project_slug="bike-map", min_level="warning")
+sentry_watch_project(project_slug="my-app", min_level="warning")
 ```
 
 The peer will start receiving Sentry events for that project as `<channel source="claude-hive">` notifications.
@@ -187,3 +187,20 @@ tail -5 ~/Library/Logs/sentry-channel-receiver.log
 When reading that log, check the timestamp against the current time. It is
 append-only across restarts, so a healthy-looking line near the end can be
 from a previous run.
+
+## Board tokens
+
+Only needed if a project is routed to a claude-workspaces board (see the README's "Filing issues on a board"). Each routed board has its own agent token in the Keychain:
+
+- **Account:** `sentry-claude-channel`
+- **Service:** `sentry-claude-channel.board-token.<board id>`
+
+Mint the token on the machine running the board server (`POST /api/board-tokens`, loopback only), then store it:
+
+```bash
+security add-generic-password -a sentry-claude-channel \
+  -s "sentry-claude-channel.board-token.<board id>" -w
+# with nothing after -w, security prompts for the value, so it stays out of shell history
+```
+
+The receiver refreshes the token daily and rewrites this entry itself. To stop filing on a board, call `sentry_unroute_from_board` and delete the entry with `security delete-generic-password -a sentry-claude-channel -s "sentry-claude-channel.board-token.<board id>"`.
