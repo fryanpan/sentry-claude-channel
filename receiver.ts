@@ -12,7 +12,7 @@
  * (see SETUP.md).
  */
 
-import { dequeueFiling, dueFilings, findMatchingPeers, getBoardRoute, listBoardRoutes, queueFiling } from "./shared/db.ts";
+import { dequeueFiling, dueFilings, findMatchingPeers, getBoardRoute, listBoardRoutes, queueFiling, staleClaims } from "./shared/db.ts";
 import { fileIssueOnBoard, refreshBoardToken, type BoardDeps } from "./shared/board.ts";
 import type { BoardRoute } from "./shared/db.ts";
 import { sendMessage, registerPeer, heartbeat, listPeers } from "./shared/hive.ts";
@@ -261,6 +261,39 @@ export function __setPeerIdForTest(id: string | null): void {
   myPeerId = id;
 }
 
+/** The fields a queued filing needs, trimmed, so a huge webhook body isn't stored. */
+export function slimPayload(payload: SentryIssueWebhook): SentryIssueWebhook {
+  const i = payload.data.issue;
+  const cut = (v: unknown, n: number) => (typeof v === "string" ? v.slice(0, n) : "");
+  return {
+    action: payload.action,
+    data: {
+      issue: {
+        id: cut(i.id, 64),
+        shortId: cut(i.shortId, 64),
+        title: cut(i.title, 500),
+        level: i.level,
+        culprit: cut(i.culprit, 300),
+        permalink: cut(i.permalink, 500),
+        project: { id: cut(i.project.id, 64), slug: cut(i.project.slug, 100), name: cut(i.project.name, 100) },
+        ...(i.metadata?.value ? { metadata: { value: cut(i.metadata.value, 500) } } : {}),
+        ...(i.count !== undefined ? { count: cut(String(i.count), 20) } : {}),
+        ...(typeof i.userCount === "number" ? { userCount: i.userCount } : {}),
+      },
+    },
+  };
+}
+
+/** Log every claim left by a receiver that stopped mid-create, so a person checks the board. */
+export function logStaleClaims(): void {
+  for (const c of staleClaims()) {
+    log("error", "board filing cut off by a restart: check the board for this issue, then clear it (see README)", {
+      issue_id: c.issue_id,
+      claimed_at: c.created_at,
+    });
+  }
+}
+
 /** Retries give up after this many attempts (about two days at the backoff below). */
 export const MAX_FILING_ATTEMPTS = 16;
 
@@ -297,7 +330,7 @@ async function fileAndLog(route: BoardRoute, payload: SentryIssueWebhook, attemp
       const queued = queueFiling({
         issue_id: issue.id,
         project_slug: issue.project.slug,
-        payload: JSON.stringify(payload),
+        payload: JSON.stringify(slimPayload(payload)),
         attempts: attempts + 1,
         next_at: Date.now() + retryDelayMs(attempts),
         last_error: "error" in result ? result.error : result.reason,
@@ -306,7 +339,10 @@ async function fileAndLog(route: BoardRoute, payload: SentryIssueWebhook, attemp
       else log("error", "board filing dropped: this project's retry queue is full", fields);
       return;
     }
-    dequeueFiling(issue.id, issue.project.slug);
+    // A fresh webhook that is skipped (another action, a lower level) says
+    // nothing about a filing already queued for this issue, so it leaves the
+    // queue alone. Only an outcome for the queued filing itself removes it.
+    if (result.kind !== "skipped" || attempts > 0) dequeueFiling(issue.id, issue.project.slug);
     log(result.kind === "failed" ? "error" : "info", `board ${result.kind}`, fields);
   } catch (err) {
     log("error", "board filing threw", { project: issue.project.slug, issue: issue.shortId, err: String(err) });
@@ -382,6 +418,7 @@ async function main() {
 
   const boardWork = (name: string, fn: () => Promise<void>) => () =>
     void fn().catch((err) => log("error", `${name} threw`, { err: String(err) }));
+  logStaleClaims();
   boardWork("board token refresh", refreshAllBoardTokens)();
   setInterval(boardWork("board token refresh", refreshAllBoardTokens), 24 * 60 * 60 * 1000);
   setInterval(boardWork("board filing retry", retryDueFilings), 60_000);

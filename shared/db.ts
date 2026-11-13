@@ -226,6 +226,13 @@ export function filedState(issueId: string, workspaceId: string): string | null 
   return row.task_id;
 }
 
+/** Pending claims older than the claim lifetime: creates a restart cut off. */
+export function staleClaims(): Array<{ issue_id: string; workspace_id: string; created_at: string }> {
+  return db
+    .prepare(`SELECT issue_id, workspace_id, created_at FROM filed_issues WHERE task_id = '${CLAIM_PENDING}' AND created_at < ?`)
+    .all(new Date(Date.now() - CLAIM_TTL_MS).toISOString()) as Array<{ issue_id: string; workspace_id: string; created_at: string }>;
+}
+
 /** Claim an issue for a create. False if another live claim or a task holds it. */
 export function claimIssue(issueId: string, workspaceId: string): boolean {
   return (claimStmt.run(issueId, workspaceId, new Date().toISOString()).changes ?? 0) > 0;

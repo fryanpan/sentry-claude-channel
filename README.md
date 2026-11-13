@@ -102,7 +102,13 @@ A claude-hive message only reaches a session that is running. A project can also
 - **Resolved, ignored and other actions, and unknown levels,** file nothing.
 - **Filing never delays the ack to Sentry.** It runs after the response, with a 10-second timeout.
 - **Retries:** a filing that certainly saved nothing (board not running, a 5xx, no token yet, or over the hourly cap) is queued in the database and retried with backoff (1, 2, 4 ... minutes, capped at 6 hours) for about two days, then logged as given up. Each project's queue holds at most 50 issues; past that, new issues are dropped and logged.
-- **No duplicates:** a create that was sent but got no answer or an unreadable one, or was cut off by a receiver restart, is **not** retried, because the board may hold it. It is logged as an error, and that issue is not filed again until someone checks the board.
+- **No duplicates:** a create that was sent but got no answer or an unreadable one, or was cut off by a receiver restart, is **not** retried, because the board may hold it. It is logged as an error (a receiver restart mid-create is also logged at startup), and that issue is not filed again until someone checks the board. Once you have looked, clear it so the issue can file again:
+
+  ```bash
+  sqlite3 ~/.sentry-channel.db "DELETE FROM filed_issues WHERE issue_id = '<sentry issue id>' AND task_id IN ('unknown', 'pending');"
+  ```
+
+  If the board already has the task, record it instead, so repeats comment on it: `UPDATE filed_issues SET task_id = '<task id>' WHERE issue_id = '<sentry issue id>';`
 
 Set it up once per board:
 

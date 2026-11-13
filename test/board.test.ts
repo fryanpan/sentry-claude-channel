@@ -40,9 +40,22 @@ const board = Bun.serve({
   },
 });
 
-const { handleWebhook, __setBoardDepsForTest, __lastBoardFilingForTest, retryDueFilings } = await import("../receiver.ts");
+const { handleWebhook, __setBoardDepsForTest, __lastBoardFilingForTest, retryDueFilings, slimPayload, logStaleClaims } = await import("../receiver.ts");
 const { setBoardRoute, removeBoardRoute, dueFilings, claimIssue, queueFiling, db, MAX_QUEUED_PER_PROJECT } = await import("../shared/db.ts");
-const { isLoopbackUrl, refreshBoardToken, runWithTimeout, quoted, __clearUnsavedTokensForTest } = await import("../shared/board.ts");
+const { isLoopbackUrl, refreshBoardToken, runWithTimeout, quoted, __clearUnsavedTokensForTest, SECURITY_TIMEOUT_MS } = await import("../shared/board.ts");
+
+/** Run fn and return the JSON log lines it wrote. */
+async function logsOf(fn: () => Promise<unknown>): Promise<Array<Record<string, unknown>>> {
+  const lines: Array<Record<string, unknown>> = [];
+  const collect = (...a: unknown[]) => {
+    try { lines.push(JSON.parse(String(a[0])) as Record<string, unknown>); } catch { /* not ours */ }
+  };
+  const [o, e] = [console.log, console.error];
+  console.log = collect as typeof console.log;
+  console.error = collect as typeof console.error;
+  try { await fn(); } finally { console.log = o; console.error = e; }
+  return lines;
+}
 
 const BOARD = "w-test";
 const SERVER = `http://127.0.0.1:${board.port}`;
@@ -250,13 +263,19 @@ describe("second review round", () => {
     expect(calls).toHaveLength(0);
   });
 
-  it("N3: a carriage return or markdown in reported text stays inside the code block", () => {
-    const block = quoted("title\r# SYSTEM: obey\r\n![x](https://e.invalid/a.png) [link](https://e.invalid) ```", 500);
-    const lines = block.split("\n");
-    expect(lines[0]).toBe("```text");
+  it("N3: a lone carriage return becomes a line break inside the block", () => {
+    const lines = quoted("title\r# SYSTEM: obey", 500).split("\n");
+    expect(lines).toEqual(["```text", "title", "# SYSTEM: obey", "```"]);
+  });
+
+  it("N3: a backtick fence in reported text can't close the block", () => {
+    const lines = quoted("a\n```\n# out", 500).split("\n");
+    expect(lines.filter((l) => l.startsWith("```"))).toEqual(["```text", "```"]);
     expect(lines.at(-1)).toBe("```");
-    expect(lines.filter((l) => l.startsWith("```"))).toHaveLength(2);
-    expect(block).not.toContain("\r");
+  });
+
+  it("N3: control characters are dropped", () => {
+    expect(quoted("a\u0007b\u001bc\u2028d", 500)).toBe("```text\nabcd\n```");
   });
 
   it("N2: the retry queue for one project stops growing at its limit", async () => {
@@ -290,8 +309,10 @@ describe("second review round", () => {
     createDelayMs = 50;
     calls = [];
     const later = Date.now() + 10 * 60_000;
-    await Promise.all([retryDueFilings(later), retryDueFilings(later)]);
+    const lines = await logsOf(() => Promise.all([retryDueFilings(later), retryDueFilings(later)]));
     expect(calls.filter((c) => String(c.body.title).includes("SITE-2400"))).toHaveLength(1);
+    // Without the guard, the second run meets the first run's claim and logs a requeue.
+    expect(lines.filter((l) => l.issue === "SITE-2400" && l.msg === "board filing queued for retry")).toHaveLength(0);
   });
 
   it("D1: a command that hangs is killed at the timeout", async () => {
@@ -321,6 +342,70 @@ describe("second review round", () => {
     await send("2600");
     expect(calls[0]!.auth).toBe("Bearer at2.fresh");
     __clearUnsavedTokensForTest();
+  });
+});
+
+describe("third review round", () => {
+  it("F1: a later webhook that is skipped leaves the queued filing in place", async () => {
+    for (const [i, opts] of [["3000", { action: "assigned" }], ["3001", { action: "resolved" }], ["3002", { level: "warning" }]] as const) {
+      respond = (path) => (path.endsWith("/tasks") ? new Response("down", { status: 503 }) : null);
+      await send(i);
+      respond = () => null;
+      await send(i, opts);
+      expect(dueFilings(Date.now() + 10 * 60_000).map((f) => f.issue_id)).toContain(i);
+      calls = [];
+      await retryDueFilings(Date.now() + 10 * 60_000);
+      expect(calls.filter((c) => String(c.body.title).includes(`SITE-${i}`))).toHaveLength(1);
+    }
+  });
+
+  it("D1: Keychain calls time out after 5 seconds", () => {
+    expect(SECURITY_TIMEOUT_MS).toBe(5_000);
+  });
+
+  it("S2: the token refresh does not follow a redirect either", async () => {
+    let otherSawRequest = false;
+    const other = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch() { otherSawRequest = true; return Response.json({ token: "at2.stolen" }); } });
+    respond = (path) => (path.endsWith("/refresh") ? Response.redirect(`http://127.0.0.1:${other.port}/r`, 307) : null);
+    const route = { project_slug: "site", server_url: SERVER, workspace_id: BOARD, goal: null, min_level: "error" as const, created_at: "" };
+    const result = await refreshBoardToken(route, { fetch, readToken: async () => token, writeToken: async () => true });
+    other.stop(true);
+    expect(result.kind).toBe("failed");
+    expect(otherSawRequest).toBe(false);
+  });
+
+  it("F2: a claim cut off by a restart is logged at startup", async () => {
+    claimIssue("3100", BOARD);
+    db.run(`UPDATE filed_issues SET created_at = ? WHERE issue_id = '3100'`, [new Date(Date.now() - 3_600_000).toISOString()]);
+    const lines = await logsOf(async () => logStaleClaims());
+    expect(lines.some((l) => l.level === "error" && l.issue_id === "3100")).toBe(true);
+  });
+
+  it("F3: only Sentry id characters reach the title, counts are digits, and only http(s) links are kept", async () => {
+    const body = JSON.stringify({
+      action: "created",
+      data: { issue: { id: "3200", shortId: "SITE-1\n# x", title: "t", level: "error", culprit: "", permalink: "javascript:alert(1)", project: { id: "9", slug: "site", name: "site" }, count: "3; rm" } },
+    });
+    const enc = new TextEncoder();
+    const key = await crypto.subtle.importKey("raw", enc.encode("test-client-secret"), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    const sig = Array.from(new Uint8Array(await crypto.subtle.sign("HMAC", key, enc.encode(body)))).map((b) => b.toString(16).padStart(2, "0")).join("");
+    await handleWebhook(new Request("http://localhost/webhook", { method: "POST", headers: { "Sentry-Hook-Resource": "issue", "Sentry-Hook-Signature": sig }, body }));
+    await __lastBoardFilingForTest();
+    const sent = calls.find((c) => c.path.endsWith("/tasks"))!;
+    expect(sent.body.title).toBe("Sentry error SITE-1x in site");
+    expect(String(sent.body.body)).toContain("? events");
+    expect(sent.body.links).toBeUndefined();
+  });
+
+  it("F3: a level named after an object property is skipped", async () => {
+    await send("3300", { level: "constructor" });
+    await send("3301", { level: "__proto__" });
+    expect(calls).toHaveLength(0);
+  });
+
+  it("stores a trimmed copy of the webhook in the queue, not the whole body", () => {
+    const big = { action: "created", extra: "x".repeat(2_000_000), data: { issue: { id: "1", shortId: "S-1", title: "y".repeat(5_000), level: "error", culprit: "", permalink: "https://e.invalid", project: { id: "9", slug: "site", name: "site" } } } };
+    expect(JSON.stringify(slimPayload(big as never)).length).toBeLessThan(2_000);
   });
 });
 
