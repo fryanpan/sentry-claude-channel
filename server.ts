@@ -26,7 +26,11 @@ import {
   addSubscription,
   removeSubscription,
   listSubscriptionsFor,
+  setBoardRoute,
+  removeBoardRoute,
+  listBoardRoutes,
 } from "./shared/db.ts";
+import { isLoopbackUrl, isValidBoardId, keychainServiceFor, KEYCHAIN_ACCOUNT } from "./shared/board.ts";
 import { listPeers } from "./shared/hive.ts";
 import { resolveSubscriberId, sessionCwd } from "./shared/session-id.ts";
 import type { SentryLevel } from "./shared/types.ts";
@@ -131,6 +135,43 @@ const TOOLS = [
       },
     },
   },
+  {
+    name: "sentry_route_to_board",
+    description:
+      "File each new issue in a Sentry project as a task on a claude-workspaces board, so errors reach the board even when no session is running. A repeat of the same issue adds a comment to its task instead of filing again. One board per project; calling again replaces the route. The board's server must be on this machine (a loopback URL), and the board's agent token must be in the macOS Keychain under the account and service name this tool reports.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        project_slug: { type: "string" as const, description: "The Sentry project slug." },
+        server_url: {
+          type: "string" as const,
+          description: "Base URL of the claude-workspaces server on this machine, e.g. http://127.0.0.1:8788. Loopback only.",
+        },
+        workspace_id: { type: "string" as const, description: "The board id to file tasks on." },
+        goal: { type: "string" as const, description: "Optional goal id on that board for the filed tasks." },
+        min_level: {
+          type: "string" as const,
+          enum: ["debug", "info", "warning", "error", "fatal"],
+          description: 'Lowest severity to file. Defaults to "error".',
+        },
+      },
+      required: ["project_slug", "server_url", "workspace_id"],
+    },
+  },
+  {
+    name: "sentry_unroute_from_board",
+    description: "Stop filing a Sentry project's issues on a board. Already-filed tasks are left alone.",
+    inputSchema: {
+      type: "object" as const,
+      properties: { project_slug: { type: "string" as const, description: "The Sentry project slug." } },
+      required: ["project_slug"],
+    },
+  },
+  {
+    name: "sentry_list_board_routes",
+    description: "List every project-to-board route on this machine.",
+    inputSchema: { type: "object" as const, properties: {} },
+  },
 ];
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
@@ -227,6 +268,55 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       return {
         content: [{ type: "text" as const, text: `${header}\n${lines}` }],
       };
+    }
+
+    case "sentry_route_to_board": {
+      const a = (args ?? {}) as Record<string, unknown>;
+      const projectSlug = String(a.project_slug ?? "").trim();
+      const serverUrl = String(a.server_url ?? "").trim();
+      const workspaceId = String(a.workspace_id ?? "").trim();
+      const goal = a.goal === undefined ? null : String(a.goal).trim() || null;
+      const minLevel = String(a.min_level ?? "error").toLowerCase() as SentryLevel;
+      if (!projectSlug) return errorResult("project_slug is required");
+      if (!isLoopbackUrl(serverUrl))
+        return errorResult("server_url must be an http(s) URL on this machine (localhost, 127.0.0.1 or [::1]); board tokens are never sent elsewhere");
+      if (!isValidBoardId(workspaceId)) return errorResult("workspace_id must be a board id (letters, digits, - and _)");
+      if (!VALID_LEVELS.includes(minLevel)) return errorResult(`min_level must be one of: ${VALID_LEVELS.join(", ")}`);
+      setBoardRoute({ project_slug: projectSlug, server_url: serverUrl, workspace_id: workspaceId, goal, min_level: minLevel });
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text:
+              `New '${projectSlug}' issues at ${minLevel} or above will be filed on board ${workspaceId}.\n` +
+              `The receiver reads that board's agent token from the macOS Keychain: account '${KEYCHAIN_ACCOUNT}', service '${keychainServiceFor(workspaceId)}'. ` +
+              `Until a token is stored there, each filing fails and is logged as an error.`,
+          },
+        ],
+      };
+    }
+
+    case "sentry_unroute_from_board": {
+      const projectSlug = String((args as { project_slug?: string }).project_slug ?? "").trim();
+      if (!projectSlug) return errorResult("project_slug is required");
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: removeBoardRoute(projectSlug) ? `Stopped filing '${projectSlug}' on a board.` : `No board route for '${projectSlug}' (no-op).`,
+          },
+        ],
+      };
+    }
+
+    case "sentry_list_board_routes": {
+      const routes = listBoardRoutes();
+      const text = routes.length
+        ? routes
+            .map((r) => `- ${r.project_slug} -> board ${r.workspace_id} at ${r.server_url} (min_level=${r.min_level}${r.goal ? `, goal ${r.goal}` : ""})`)
+            .join("\n")
+        : "No board routes. Use sentry_route_to_board to add one.";
+      return { content: [{ type: "text" as const, text }] };
     }
 
     default:

@@ -12,7 +12,8 @@
  * (mirrors notion-bridge.fryanpan.com pattern).
  */
 
-import { findMatchingPeers } from "./shared/db.ts";
+import { findMatchingPeers, getBoardRoute, listBoardRoutes } from "./shared/db.ts";
+import { fileIssueOnBoard, refreshBoardToken, type BoardDeps } from "./shared/board.ts";
 import { sendMessage, registerPeer, heartbeat, listPeers } from "./shared/hive.ts";
 import type { SentryIssueWebhook, SentryLevel } from "./shared/types.ts";
 
@@ -182,6 +183,22 @@ export async function handleWebhook(req: Request): Promise<Response> {
     });
   }
 
+  // File on the project's board, if it has one. This runs whether or not any
+  // session is subscribed or alive, which is the point of it.
+  // Not awaited: Sentry wants a quick ack, and a slow board must not delay it.
+  const route = getBoardRoute(issue.project.slug);
+  if (route) {
+    lastBoardFiling = fileIssueOnBoard(route, payload, boardDeps).then((result) => {
+      log(result.kind === "failed" ? "error" : "info", `board ${result.kind}`, {
+        project: issue.project.slug,
+        issue: issue.shortId,
+        ...("taskId" in result ? { task_id: result.taskId } : {}),
+        ...("reason" in result ? { reason: result.reason } : {}),
+        ...("error" in result ? { err: result.error } : {}),
+      });
+    });
+  }
+
   if (matches.length === 0 || !myPeerId) {
     return new Response("ok", { status: 200 });
   }
@@ -232,9 +249,33 @@ async function startHeartbeat(): Promise<void> {
   }, 30_000);
 }
 
+let boardDeps: BoardDeps | undefined;
+let lastBoardFiling: Promise<void> = Promise.resolve();
+
+/** Test seam: settles when the most recent board filing has finished. */
+export function __lastBoardFilingForTest(): Promise<void> {
+  return lastBoardFiling;
+}
+
+/** Test seam: replace the HTTP client and Keychain reader used for board filing. */
+export function __setBoardDepsForTest(deps: BoardDeps | undefined): void {
+  boardDeps = deps;
+}
+
 /** Test seam: the receiver must have a hive peer id before it can fan out. */
 export function __setPeerIdForTest(id: string | null): void {
   myPeerId = id;
+}
+
+/** Refresh every routed board's token: at startup, then once a day. */
+async function refreshAllBoardTokens(): Promise<void> {
+  for (const route of listBoardRoutes()) {
+    const result = await refreshBoardToken(route, boardDeps);
+    log(result.kind === "failed" ? "error" : "info", `board token ${result.kind}`, {
+      project: route.project_slug,
+      ...(result.kind === "failed" ? { err: result.error } : { expires_at: result.expiresAt }),
+    });
+  }
 }
 
 async function main() {
@@ -243,6 +284,8 @@ async function main() {
   }
   await ensureRegistered();
   await startHeartbeat();
+  await refreshAllBoardTokens();
+  setInterval(() => void refreshAllBoardTokens(), 24 * 60 * 60 * 1000);
 
   Bun.serve({
     port: PORT,

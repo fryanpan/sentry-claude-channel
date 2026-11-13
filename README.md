@@ -19,6 +19,7 @@ That id is taken from claude-hive's own live peer list rather than computed here
 - `shared/session-id.ts` — works out which session is calling, from the cwd the launcher captured plus claude-hive's live peer list. Refuses rather than guessing.
 - `scripts/remap-subscriptions.ts` — one-off repair for rows filed under a wrong id (dry-run by default).
 - `shared/types.ts` — Sentry webhook payload + subscription types.
+- `shared/board.ts` — files new issues as tasks on a claude-workspaces board, comments on repeats, and refreshes each board's token.
 
 ## Requirements
 
@@ -91,6 +92,29 @@ Each peer subscribes to one or more Sentry projects with a minimum severity thre
 Levels: `debug` < `info` < `warning` < `error` < `fatal`.
 
 Example: bike-map peer subscribes to project `bike-map` with `min_level=warning` → gets warnings, errors, and fatals; ignores debug/info.
+
+## Filing issues on a board
+
+A claude-hive message only reaches a session that is running. To make sure an error is never missed, a project can also be routed to a claude-workspaces board, and the receiver then files each new issue as a task there itself.
+
+- **A new issue** (`created`) at or above the route's level (default `error`) files one task, holding the title, culprit, counts and a link to the issue.
+- **The same issue again** (filed before, or `unresolved` after a regression) adds a comment to that task instead of filing a second. The issue-to-task map lives in the bridge's database, and each comment carries a request id, so a webhook Sentry retries posts once.
+- **Resolved, ignored and other actions** file nothing.
+- **Filing never delays the ack to Sentry.** It runs after the response, with a 10-second timeout, and a failure is logged as an error.
+
+Set it up once per board:
+
+1. Mint a board agent token on the machine running the board server: `POST /api/board-tokens` with `{agentId, boardId, label}` (loopback only).
+2. Store it in the Keychain where the receiver looks for it:
+   `security add-generic-password -a sentry-claude-channel -s sentry-claude-channel.board-token.<board id> -w`
+   (with no value after `-w`, `security` prompts for it, so it stays out of your shell history).
+3. From any session, call `sentry_route_to_board` with the project slug, the board server's loopback URL and the board id. `sentry_list_board_routes` and `sentry_unroute_from_board` manage routes.
+
+Routes are kept only in the local database, never in this repository.
+
+**Security.** The receiver only ever sends a board token to a loopback address (`localhost`, `127.0.0.1` or `[::1]`), so a mistaken or hostile route cannot hand a token to another host. The Keychain entry's name is derived from the board id, so a route can't point the receiver at some other secret. Board tokens last 7 days; the receiver refreshes each one at startup and then daily, writing the new value back to the Keychain. If a token has already expired or been revoked, each filing logs an error naming the project, and the board needs a fresh mint.
+
+**Not supported yet:** boards that are not on the same machine as the receiver.
 
 ## License
 

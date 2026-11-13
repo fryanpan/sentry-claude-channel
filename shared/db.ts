@@ -105,3 +105,93 @@ export function findMatchingPeers(
     .filter((r) => LEVEL_RANK[r.min_level] <= eventRank)
     .map((r) => r.peer_stable_id);
 }
+
+// ── Board routes ────────────────────────────────────────────────────────────
+//
+// A board route files a task on a claude-workspaces board for each new issue in
+// a project, so an error reaches a board even when no session is running.
+// Routes live only in this local database, never in the repository.
+
+db.run(`
+  CREATE TABLE IF NOT EXISTS board_routes (
+    project_slug TEXT PRIMARY KEY,
+    server_url TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    goal TEXT,
+    min_level TEXT NOT NULL DEFAULT 'error',
+    created_at TEXT NOT NULL
+  )
+`);
+
+// Which board task each Sentry issue was filed as, so a repeat comments on
+// that task instead of filing a second one.
+db.run(`
+  CREATE TABLE IF NOT EXISTS filed_issues (
+    issue_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (issue_id, workspace_id)
+  )
+`);
+
+export interface BoardRoute {
+  project_slug: string;
+  server_url: string;
+  workspace_id: string;
+  goal: string | null;
+  min_level: SentryLevel;
+  created_at: string;
+}
+
+const upsertRouteStmt = db.prepare(`
+  INSERT INTO board_routes (project_slug, server_url, workspace_id, goal, min_level, created_at)
+  VALUES (?, ?, ?, ?, ?, ?)
+  ON CONFLICT(project_slug) DO UPDATE SET
+    server_url = excluded.server_url,
+    workspace_id = excluded.workspace_id,
+    goal = excluded.goal,
+    min_level = excluded.min_level
+`);
+const deleteRouteStmt = db.prepare(`DELETE FROM board_routes WHERE project_slug = ?`);
+const getRouteStmt = db.prepare(`SELECT * FROM board_routes WHERE project_slug = ?`);
+const listRoutesStmt = db.prepare(`SELECT * FROM board_routes ORDER BY project_slug`);
+const getFiledStmt = db.prepare(
+  `SELECT task_id FROM filed_issues WHERE issue_id = ? AND workspace_id = ?`,
+);
+const putFiledStmt = db.prepare(`
+  INSERT INTO filed_issues (issue_id, workspace_id, task_id, created_at) VALUES (?, ?, ?, ?)
+  ON CONFLICT(issue_id, workspace_id) DO UPDATE SET task_id = excluded.task_id
+`);
+
+export function setBoardRoute(route: Omit<BoardRoute, "created_at">): void {
+  upsertRouteStmt.run(
+    route.project_slug,
+    route.server_url,
+    route.workspace_id,
+    route.goal,
+    route.min_level,
+    new Date().toISOString(),
+  );
+}
+
+export function removeBoardRoute(projectSlug: string): boolean {
+  return (deleteRouteStmt.run(projectSlug).changes ?? 0) > 0;
+}
+
+export function getBoardRoute(projectSlug: string): BoardRoute | null {
+  return (getRouteStmt.get(projectSlug) as BoardRoute | null) ?? null;
+}
+
+export function listBoardRoutes(): BoardRoute[] {
+  return listRoutesStmt.all() as BoardRoute[];
+}
+
+export function filedTaskFor(issueId: string, workspaceId: string): string | null {
+  const row = getFiledStmt.get(issueId, workspaceId) as { task_id: string } | null;
+  return row?.task_id ?? null;
+}
+
+export function recordFiledTask(issueId: string, workspaceId: string, taskId: string): void {
+  putFiledStmt.run(issueId, workspaceId, taskId, new Date().toISOString());
+}
