@@ -409,6 +409,55 @@ describe("third review round", () => {
   });
 });
 
+describe("final review round", () => {
+  it("N1: at startup a just-made pending claim is logged and marked unknown", async () => {
+    claimIssue("4000", BOARD); // seconds old, as after a launchd restart
+    const lines = await logsOf(async () => logStaleClaims());
+    expect(lines.some((l) => l.level === "error" && l.issue_id === "4000")).toBe(true);
+    const after = await logsOf(() => send("4000"));
+    expect(calls).toHaveLength(0);
+    expect(after.some((l) => l.level === "error" && l.issue === "SITE-4000")).toBe(true);
+  });
+
+  async function signed(issue: Record<string, unknown>) {
+    const body = JSON.stringify({ action: "created", data: { issue } });
+    const enc = new TextEncoder();
+    const key = await crypto.subtle.importKey("raw", enc.encode("test-client-secret"), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    const sig = Array.from(new Uint8Array(await crypto.subtle.sign("HMAC", key, enc.encode(body)))).map((b) => b.toString(16).padStart(2, "0")).join("");
+    await handleWebhook(new Request("http://localhost/webhook", { method: "POST", headers: { "Sentry-Hook-Resource": "issue", "Sentry-Hook-Signature": sig }, body }));
+    await __lastBoardFilingForTest();
+  }
+
+  it("N2: a long or numeric issue id leaves the queue once it files", async () => {
+    for (const id of ["9".repeat(80), 4100]) {
+      respond = (path) => (path.endsWith("/tasks") ? new Response("down", { status: 503 }) : null);
+      await signed({ id, shortId: "SITE-N2", title: "t", level: "error", culprit: "", permalink: "https://e.invalid/n2", project: { id: 9, slug: "site", name: "site" } });
+      respond = () => null;
+      await retryDueFilings(Date.now() + 10 * 60_000);
+      expect(dueFilings(Date.now() + 10 * 3_600_000).map((f) => f.issue_id)).not.toContain(String(id));
+    }
+  });
+
+  it("queues the trimmed copy of a webhook, not the whole body", async () => {
+    respond = (path) => (path.endsWith("/tasks") ? new Response("down", { status: 503 }) : null);
+    await send("4200", { title: "z".repeat(100_000) });
+    const row = dueFilings(Date.now() + 10 * 60_000).find((f) => f.issue_id === "4200")!;
+    expect(row.payload.length).toBeLessThan(3_000);
+  });
+
+  it("the first attempt and a retry send the same task", async () => {
+    respond = (path) => (path.endsWith("/tasks") ? new Response("down", { status: 503 }) : null);
+    await signed({ id: "4300", shortId: "SITE-4300", title: "t", level: "error", culprit: "c".repeat(700), permalink: "https://e.invalid/4300", project: { id: "9", slug: "site", name: "site" }, userCount: "7" });
+    const first = calls.find((c) => c.path.endsWith("/tasks"))!.body;
+    respond = () => null;
+    calls = [];
+    await retryDueFilings(Date.now() + 10 * 60_000);
+    const retry = calls.find((c) => String(c.body.title).includes("SITE-4300"))!.body;
+    expect(retry.body).toBe(first.body);
+    expect(String(first.body)).toContain("7 users");
+  });
+});
+
 describe("refreshing a board token", () => {
   it("swaps the token for the fresh one the board returns", async () => {
     let written = "";

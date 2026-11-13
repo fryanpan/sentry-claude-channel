@@ -226,11 +226,16 @@ export function filedState(issueId: string, workspaceId: string): string | null 
   return row.task_id;
 }
 
-/** Pending claims older than the claim lifetime: creates a restart cut off. */
-export function staleClaims(): Array<{ issue_id: string; workspace_id: string; created_at: string }> {
-  return db
-    .prepare(`SELECT issue_id, workspace_id, created_at FROM filed_issues WHERE task_id = '${CLAIM_PENDING}' AND created_at < ?`)
-    .all(new Date(Date.now() - CLAIM_TTL_MS).toISOString()) as Array<{ issue_id: string; workspace_id: string; created_at: string }>;
+/**
+ * Mark every pending claim unknown and return them. Call only at startup,
+ * when no create can be in flight, so each one was cut off by a restart.
+ */
+export function claimsCutOffByRestart(): Array<{ issue_id: string; workspace_id: string; created_at: string }> {
+  const rows = db
+    .prepare(`SELECT issue_id, workspace_id, created_at FROM filed_issues WHERE task_id = '${CLAIM_PENDING}'`)
+    .all() as Array<{ issue_id: string; workspace_id: string; created_at: string }>;
+  db.run(`UPDATE filed_issues SET task_id = '${CLAIM_UNKNOWN}' WHERE task_id = '${CLAIM_PENDING}'`);
+  return rows;
 }
 
 /** Claim an issue for a create. False if another live claim or a task holds it. */
