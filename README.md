@@ -12,13 +12,14 @@ That id is taken from claude-hive's own live peer list rather than computed here
 
 ## Architecture
 
-- `receiver.ts` — long-running HTTP daemon. Receives Sentry webhook POSTs at `/webhook`, verifies HMAC signature, fan-outs to subscribed peers via claude-hive `/send-message`. Runs behind a Cloudflare tunnel at `sentry-bridge.fryanpan.com`.
+- `receiver.ts` — long-running HTTP daemon. Receives Sentry webhook POSTs at `/webhook`, verifies HMAC signature, fan-outs to subscribed peers via claude-hive `/send-message`. Runs behind a tunnel that gives Sentry a public HTTPS URL.
 - `server.ts` — per-Claude-session MCP server. Provides `sentry_watch_project`, `sentry_unwatch_project`, `sentry_list_my_watches` tools.
 - `shared/db.ts` — SQLite subscription store at `~/.sentry-channel.db` (WAL mode; receiver and MCP server both open it).
 - `shared/hive.ts` — thin HTTP client for the claude-hive broker.
 - `shared/session-id.ts` — works out which session is calling, from the cwd the launcher captured plus claude-hive's live peer list. Refuses rather than guessing.
 - `scripts/remap-subscriptions.ts` — one-off repair for rows filed under a wrong id (dry-run by default).
 - `shared/types.ts` — Sentry webhook payload + subscription types.
+- `shared/board.ts` — files new issues as tasks on a claude-workspaces board, comments on repeats, and refreshes each board's token.
 
 ## Requirements
 
@@ -42,7 +43,7 @@ This repo is a Claude Code plugin. Install it via the standard plugin flow — t
 
 ```bash
 # Add this checkout as a local plugin marketplace
-claude plugin marketplace add /Users/bryanchan/dev/sentry-claude-channel
+claude plugin marketplace add /path/to/sentry-claude-channel
 
 # Install the plugin from that marketplace
 claude plugin install sentry-claude-channel@sentry-claude-channel
@@ -61,7 +62,7 @@ If you prefer to wire up the MCP server manually (e.g. you're on a Claude Code v
   "mcpServers": {
     "sentry-claude-channel": {
       "command": "bun",
-      "args": ["/Users/bryanchan/dev/sentry-claude-channel/server.ts"]
+      "args": ["/path/to/sentry-claude-channel/server.ts"]
     }
   }
 }
@@ -79,7 +80,7 @@ bun install
 ./scripts/run-receiver.sh
 
 # From a Claude Code session, once the plugin (or raw MCP entry) is installed:
-#   sentry_watch_project(project_slug="bike-map", min_level="warning")
+#   sentry_watch_project(project_slug="my-app", min_level="warning")
 ```
 
 See [SETUP.md](./SETUP.md) for Sentry webhook configuration + Cloudflare tunnel deployment.
@@ -90,7 +91,41 @@ Each peer subscribes to one or more Sentry projects with a minimum severity thre
 
 Levels: `debug` < `info` < `warning` < `error` < `fatal`.
 
-Example: bike-map peer subscribes to project `bike-map` with `min_level=warning` → gets warnings, errors, and fatals; ignores debug/info.
+Example: a session subscribes to project `my-app` with `min_level=warning` → gets warnings, errors, and fatals; ignores debug/info.
+
+## Filing issues on a board
+
+A claude-hive message only reaches a session that is running. A project can also be routed to a claude-workspaces board, and the receiver then files each new issue as a task there itself.
+
+- **A new issue** (`created`) at or above the route's level (default `error`) files one task. The title holds only fields Sentry assigns (level, short id, project); the error text goes in the body.
+- **The same issue again** (filed before, or `unresolved` after a regression) adds a comment to that task instead of filing a second. The issue-to-task map lives in the bridge's database. A claim row stops two webhooks for one issue from filing twice, and each comment carries a request id, so a webhook Sentry retries posts once. If the task was deleted on the board, the issue files fresh.
+- **Resolved, ignored and other actions, and unknown levels,** file nothing.
+- **Filing never delays the ack to Sentry.** It runs after the response, with a 10-second timeout.
+- **Retries:** a filing that certainly saved nothing (board not running, a 5xx, no token yet, or over the hourly cap) is queued in the database and retried with backoff (1, 2, 4 ... minutes, capped at 6 hours) for about two days, then logged as given up. Each project's queue holds at most 50 issues; past that, new issues are dropped and logged.
+- **No duplicates:** a create that was sent but got no answer or an unreadable one, or was cut off by a receiver restart, is **not** retried, because the board may hold it. It is logged as an error (a receiver restart mid-create is also logged at startup), and that issue is not filed again until someone checks the board. Once you have looked, clear it so the issue can file again:
+
+  ```bash
+  sqlite3 ~/.sentry-channel.db "DELETE FROM filed_issues WHERE issue_id = '<sentry issue id>' AND task_id IN ('unknown', 'pending');"
+  ```
+
+  If the board already has the task, record it instead, so repeats comment on it: `UPDATE filed_issues SET task_id = '<task id>' WHERE issue_id = '<sentry issue id>';`
+
+Set it up once per board:
+
+1. Mint a board agent token on the machine running the board server: `POST /api/board-tokens` with `{agentId, boardId, label}` (loopback only).
+2. Store it in the Keychain where the receiver looks for it (see [SETUP.md](./SETUP.md#board-tokens)).
+3. From any session, call `sentry_route_to_board` with the project slug, the board server's loopback URL and the board id. `sentry_list_board_routes` and `sentry_unroute_from_board` manage routes.
+
+Routes are kept only in the local database, never in this repository.
+
+**Security.**
+
+- The receiver only ever sends a board token to a loopback address (`localhost`, `127.0.0.1` or `[::1]`) and refuses redirects, so a mistaken or hostile route cannot hand a token to another host.
+- The Keychain entry's name is derived from the board id, so a route can't point the receiver at some other secret. Every `security` call is killed after 5 seconds, so a locked Keychain can't hang the receiver, and the HTTP server starts before any board work.
+- **Reported error text is untrusted.** For a project whose DSN ships in a web page, anyone can send events with text they choose. That text goes in a code block in the task body (so it can't render as headings, links or images) under a line saying it's untrusted, never in the title, and each route files at most 10 new tasks an hour.
+- Board tokens last 7 days. The receiver refreshes each one at startup and then daily, writing the new value back to the Keychain; if that write fails, it keeps the new token in memory and tries the write again at the next refresh. If a token has already expired or been revoked, filings are queued and logged as errors until the board gets a fresh mint.
+
+**Not supported yet:** boards that are not on the same machine as the receiver.
 
 ## License
 

@@ -12,7 +12,10 @@
 import type { StableId } from "./types.ts";
 import type { HivePeer } from "./session-id.ts";
 
-const HIVE_URL = process.env.CLAUDE_HIVE_URL ?? "http://127.0.0.1:7900";
+/** Read on each call, so a test (or a changed env file) is never stuck with the first value. */
+function hiveUrl(): string {
+  return process.env.CLAUDE_HIVE_URL ?? "http://127.0.0.1:7900";
+}
 const HEALTH_TIMEOUT_MS = 2000;
 
 interface RegisterResponse {
@@ -23,7 +26,7 @@ interface RegisterResponse {
 }
 
 async function postJson<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${HIVE_URL}${path}`, {
+  const res = await fetch(`${hiveUrl()}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -88,7 +91,7 @@ export async function unregister(id: string): Promise<void> {
 
 export async function isHiveAlive(): Promise<boolean> {
   try {
-    const res = await fetch(`${HIVE_URL}/health`, {
+    const res = await fetch(`${hiveUrl()}/health`, {
       signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
     });
     return res.ok;

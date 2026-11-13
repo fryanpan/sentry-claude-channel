@@ -26,8 +26,7 @@
  *      naming the cwd it tried, because a guess here is exactly the bug.
  *
  * Matching is done on realpath, so a session registered under
- * /Volumes/Data/Users/... still matches a cwd reached through the
- * /Users/<user>/dev symlink. Different strings, same directory, same session.
+ * one real path still matches a cwd reached through a symlink to it. Different strings, same directory, same session.
  */
 
 import { realpathSync } from "node:fs";

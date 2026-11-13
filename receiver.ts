@@ -8,11 +8,13 @@
  *
  * Sentry webhook docs: https://docs.sentry.io/organization/integrations/integration-platform/webhooks/
  *
- * Bryan deploys this behind a Cloudflare tunnel at sentry-bridge.fryanpan.com
- * (mirrors notion-bridge.fryanpan.com pattern).
+ * Deployed behind a tunnel that gives Sentry a public HTTPS URL for /webhook
+ * (see SETUP.md).
  */
 
-import { findMatchingPeers } from "./shared/db.ts";
+import { claimsCutOffByRestart, dequeueFiling, dueFilings, findMatchingPeers, getBoardRoute, listBoardRoutes, queueFiling } from "./shared/db.ts";
+import { fileIssueOnBoard, refreshBoardToken, type BoardDeps } from "./shared/board.ts";
+import type { BoardRoute } from "./shared/db.ts";
 import { sendMessage, registerPeer, heartbeat, listPeers } from "./shared/hive.ts";
 import type { SentryIssueWebhook, SentryLevel } from "./shared/types.ts";
 
@@ -182,6 +184,16 @@ export async function handleWebhook(req: Request): Promise<Response> {
     });
   }
 
+  // File on the project's board, if it has one. This runs whether or not any
+  // session is subscribed or alive, which is the point of it.
+  // Not awaited: Sentry wants a quick ack, and a slow board must not delay it.
+  const route = getBoardRoute(issue.project.slug);
+  if (route) {
+    // The first attempt files the same trimmed copy a retry would, so both read alike.
+    const filing = fileAndLog(route, slimPayload(payload), 0).finally(() => inFlight.delete(filing));
+    inFlight.add(filing);
+  }
+
   if (matches.length === 0 || !myPeerId) {
     return new Response("ok", { status: 200 });
   }
@@ -232,9 +244,163 @@ async function startHeartbeat(): Promise<void> {
   }, 30_000);
 }
 
+let boardDeps: BoardDeps | undefined;
+const inFlight = new Set<Promise<void>>();
+
+/** Test seam: settles when every board filing in flight has finished. */
+export async function __lastBoardFilingForTest(): Promise<void> {
+  await Promise.all([...inFlight]);
+}
+
+/** Test seam: replace the HTTP client and Keychain reader used for board filing. */
+export function __setBoardDepsForTest(deps: BoardDeps | undefined): void {
+  boardDeps = deps;
+}
+
 /** Test seam: the receiver must have a hive peer id before it can fan out. */
 export function __setPeerIdForTest(id: string | null): void {
   myPeerId = id;
+}
+
+/** The fields a queued filing needs, trimmed, so a huge webhook body isn't stored. */
+export function slimPayload(payload: SentryIssueWebhook): SentryIssueWebhook {
+  const i = payload.data.issue;
+  const cut = (v: unknown, n: number) => (typeof v === "string" ? v.slice(0, n) : "");
+  return {
+    action: payload.action,
+    data: {
+      issue: {
+        // Key fields stay whole: the queue and the issue-to-task map are keyed on them.
+        id: String(i.id),
+        shortId: cut(i.shortId, 64),
+        title: cut(i.title, 500),
+        level: i.level,
+        culprit: cut(i.culprit, 300),
+        permalink: cut(i.permalink, 2_000),
+        project: { id: String(i.project.id), slug: String(i.project.slug), name: cut(i.project.name, 100) },
+        ...(i.metadata?.value ? { metadata: { value: cut(i.metadata.value, 500) } } : {}),
+        ...(i.count !== undefined ? { count: cut(String(i.count), 20) } : {}),
+        ...(i.userCount !== undefined ? { userCount: cut(String(i.userCount), 20) as unknown as number } : {}),
+      },
+    },
+  };
+}
+
+/**
+ * At startup, every pending claim belongs to a create the last process never
+ * finished: a new process has none in flight. Mark each unknown and log it, so
+ * a person checks the board.
+ */
+export function logStaleClaims(): void {
+  for (const c of claimsCutOffByRestart()) {
+    log("error", "board filing cut off by a restart: check the board for this issue, then clear it (see README)", {
+      issue_id: c.issue_id,
+      claimed_at: c.created_at,
+    });
+  }
+}
+
+/** Retries give up after this many attempts (about two days at the backoff below). */
+export const MAX_FILING_ATTEMPTS = 16;
+
+/** Minutes until retry number `attempt`: 1, 2, 4, ... capped at 6 hours. */
+export function retryDelayMs(attempt: number): number {
+  return Math.min(2 ** attempt, 360) * 60_000;
+}
+
+/**
+ * File one webhook on its board and log the result. A filing that certainly
+ * saved nothing is queued in the database and retried; nothing here throws.
+ */
+async function fileAndLog(
+  route: BoardRoute,
+  payload: SentryIssueWebhook,
+  attempts: number,
+  key = { issue_id: String(payload.data.issue.id), project_slug: String(payload.data.issue.project.slug) },
+): Promise<void> {
+  const issue = payload.data.issue;
+  try {
+    const result = await fileIssueOnBoard(route, payload, boardDeps);
+    const fields = {
+      project: issue.project.slug,
+      issue: issue.shortId,
+      ...(attempts > 0 ? { attempt: attempts + 1 } : {}),
+      ...("taskId" in result ? { task_id: result.taskId } : {}),
+      ...("reason" in result ? { reason: result.reason } : {}),
+      ...("error" in result ? { err: result.error } : {}),
+    };
+    // A queued filing that meets another filing's claim waits its turn again;
+    // a fresh webhook that does is a duplicate delivery and is dropped.
+    const requeue = result.kind === "retry" || (result.kind === "skipped" && result.inProgress === true && attempts > 0);
+    if (requeue) {
+      if (attempts + 1 >= MAX_FILING_ATTEMPTS) {
+        dequeueFiling(key.issue_id, key.project_slug);
+        log("error", "board filing given up after repeated failures", fields);
+        return;
+      }
+      const queued = queueFiling({
+        issue_id: key.issue_id,
+        project_slug: key.project_slug,
+        payload: JSON.stringify(slimPayload(payload)),
+        attempts: attempts + 1,
+        next_at: Date.now() + retryDelayMs(attempts),
+        last_error: "error" in result ? result.error : result.reason,
+      });
+      if (queued) log("warn", "board filing queued for retry", fields);
+      else log("error", "board filing dropped: this project's retry queue is full", fields);
+      return;
+    }
+    // A fresh webhook that is skipped (another action, a lower level) says
+    // nothing about a filing already queued for this issue, so it leaves the
+    // queue alone. Only an outcome for the queued filing itself removes it.
+    if (result.kind !== "skipped" || attempts > 0) dequeueFiling(key.issue_id, key.project_slug);
+    log(result.kind === "failed" ? "error" : "info", `board ${result.kind}`, fields);
+  } catch (err) {
+    log("error", "board filing threw", { project: issue.project.slug, issue: issue.shortId, err: String(err) });
+  }
+}
+
+let retrying = false;
+
+/** Retry every queued filing that is due. Runs every minute; a run still going skips the next. */
+export async function retryDueFilings(nowMs = Date.now()): Promise<void> {
+  if (retrying) return;
+  retrying = true;
+  try {
+    await retryDue(nowMs);
+  } finally {
+    retrying = false;
+  }
+}
+
+async function retryDue(nowMs: number): Promise<void> {
+  for (const f of dueFilings(nowMs)) {
+    const route = getBoardRoute(f.project_slug);
+    if (!route) {
+      dequeueFiling(f.issue_id, f.project_slug);
+      continue;
+    }
+    let payload: SentryIssueWebhook;
+    try {
+      payload = JSON.parse(f.payload) as SentryIssueWebhook;
+    } catch {
+      dequeueFiling(f.issue_id, f.project_slug);
+      continue;
+    }
+    // Dequeue under the row's own key, whatever the stored copy says.
+    await fileAndLog(route, payload, f.attempts, { issue_id: f.issue_id, project_slug: f.project_slug });
+  }
+}
+
+/** Refresh every routed board's token: at startup, then once a day. */
+async function refreshAllBoardTokens(): Promise<void> {
+  for (const route of listBoardRoutes()) {
+    const result = await refreshBoardToken(route, boardDeps); // never throws
+    log(result.kind === "failed" ? "error" : "info", `board token ${result.kind}`, {
+      project: route.project_slug,
+      ...(result.kind === "failed" ? { err: result.error } : { expires_at: result.expiresAt }),
+    });
+  }
 }
 
 async function main() {
@@ -244,6 +410,8 @@ async function main() {
   await ensureRegistered();
   await startHeartbeat();
 
+  // The server starts before any board work, so a slow board or a locked
+  // Keychain can never keep the port closed.
   Bun.serve({
     port: PORT,
     async fetch(req) {
@@ -259,6 +427,13 @@ async function main() {
   });
 
   log("info", `sentry-claude-channel receiver listening on :${PORT}`);
+
+  const boardWork = (name: string, fn: () => Promise<void>) => () =>
+    void fn().catch((err) => log("error", `${name} threw`, { err: String(err) }));
+  boardWork("cut-off claim scan", async () => logStaleClaims())();
+  boardWork("board token refresh", refreshAllBoardTokens)();
+  setInterval(boardWork("board token refresh", refreshAllBoardTokens), 24 * 60 * 60 * 1000);
+  setInterval(boardWork("board filing retry", retryDueFilings), 60_000);
 }
 
 // Guarded so the module can be imported by tests without binding a port or
