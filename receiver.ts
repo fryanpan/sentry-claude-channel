@@ -285,21 +285,25 @@ async function fileAndLog(route: BoardRoute, payload: SentryIssueWebhook, attemp
       ...("reason" in result ? { reason: result.reason } : {}),
       ...("error" in result ? { err: result.error } : {}),
     };
-    if (result.kind === "retry") {
+    // A queued filing that meets another filing's claim waits its turn again;
+    // a fresh webhook that does is a duplicate delivery and is dropped.
+    const requeue = result.kind === "retry" || (result.kind === "skipped" && result.inProgress === true && attempts > 0);
+    if (requeue) {
       if (attempts + 1 >= MAX_FILING_ATTEMPTS) {
         dequeueFiling(issue.id, issue.project.slug);
         log("error", "board filing given up after repeated failures", fields);
         return;
       }
-      queueFiling({
+      const queued = queueFiling({
         issue_id: issue.id,
         project_slug: issue.project.slug,
         payload: JSON.stringify(payload),
         attempts: attempts + 1,
         next_at: Date.now() + retryDelayMs(attempts),
-        last_error: result.error,
+        last_error: "error" in result ? result.error : result.reason,
       });
-      log("warn", "board filing queued for retry", fields);
+      if (queued) log("warn", "board filing queued for retry", fields);
+      else log("error", "board filing dropped: this project's retry queue is full", fields);
       return;
     }
     dequeueFiling(issue.id, issue.project.slug);
@@ -309,8 +313,20 @@ async function fileAndLog(route: BoardRoute, payload: SentryIssueWebhook, attemp
   }
 }
 
-/** Retry every queued filing that is due. Runs every minute. */
+let retrying = false;
+
+/** Retry every queued filing that is due. Runs every minute; a run still going skips the next. */
 export async function retryDueFilings(nowMs = Date.now()): Promise<void> {
+  if (retrying) return;
+  retrying = true;
+  try {
+    await retryDue(nowMs);
+  } finally {
+    retrying = false;
+  }
+}
+
+async function retryDue(nowMs: number): Promise<void> {
   for (const f of dueFilings(nowMs)) {
     const route = getBoardRoute(f.project_slug);
     if (!route) {

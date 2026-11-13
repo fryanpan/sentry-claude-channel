@@ -191,9 +191,10 @@ export function recordFiledTask(issueId: string, workspaceId: string, taskId: st
 // ── Claims and retries for board filing ─────────────────────────────────────
 //
 // A filed_issues row whose task_id is CLAIM_PENDING marks a create in flight.
-// One older than CLAIM_TTL_MS is from a receiver that died mid-create and is
-// ignored. CLAIM_UNKNOWN marks a create that was sent but never answered: the
-// board may hold the task, so nothing files that issue again.
+// One older than CLAIM_TTL_MS is from a receiver that died mid-create: the
+// board may hold that task, so it is read as CLAIM_UNKNOWN, like a create that
+// was sent and never answered. Nothing files an unknown issue again; the
+// receiver logs it as an error for a person to check the board.
 
 export const CLAIM_PENDING = "pending";
 export const CLAIM_UNKNOWN = "unknown";
@@ -201,8 +202,7 @@ const CLAIM_TTL_MS = 10 * 60 * 1000;
 
 const claimStmt = db.prepare(`
   INSERT INTO filed_issues (issue_id, workspace_id, task_id, created_at) VALUES (?, ?, '${CLAIM_PENDING}', ?)
-  ON CONFLICT(issue_id, workspace_id) DO UPDATE SET task_id = '${CLAIM_PENDING}', created_at = excluded.created_at
-  WHERE filed_issues.task_id = '${CLAIM_PENDING}' AND filed_issues.created_at < ?
+  ON CONFLICT(issue_id, workspace_id) DO NOTHING
 `);
 const getFiledRowStmt = db.prepare(
   `SELECT task_id, created_at FROM filed_issues WHERE issue_id = ? AND workspace_id = ?`,
@@ -222,15 +222,13 @@ const countSinceStmt = db.prepare(
 export function filedState(issueId: string, workspaceId: string): string | null {
   const row = getFiledRowStmt.get(issueId, workspaceId) as { task_id: string; created_at: string } | null;
   if (!row) return null;
-  if (row.task_id === CLAIM_PENDING && Date.parse(row.created_at) < Date.now() - CLAIM_TTL_MS) return null;
+  if (row.task_id === CLAIM_PENDING && Date.parse(row.created_at) < Date.now() - CLAIM_TTL_MS) return CLAIM_UNKNOWN;
   return row.task_id;
 }
 
 /** Claim an issue for a create. False if another live claim or a task holds it. */
 export function claimIssue(issueId: string, workspaceId: string): boolean {
-  const now = new Date();
-  const staleBefore = new Date(now.getTime() - CLAIM_TTL_MS).toISOString();
-  return (claimStmt.run(issueId, workspaceId, now.toISOString(), staleBefore).changes ?? 0) > 0;
+  return (claimStmt.run(issueId, workspaceId, new Date().toISOString()).changes ?? 0) > 0;
 }
 
 /** Drop a claim whose create certainly saved nothing. */
@@ -282,10 +280,23 @@ const queueStmt = db.prepare(`
     next_at = excluded.next_at, last_error = excluded.last_error
 `);
 const dueStmt = db.prepare(`SELECT * FROM pending_filings WHERE next_at <= ? ORDER BY next_at`);
+const countQueuedStmt = db.prepare(`SELECT COUNT(*) AS n FROM pending_filings WHERE project_slug = ?`);
+const isQueuedStmt = db.prepare(`SELECT 1 FROM pending_filings WHERE issue_id = ? AND project_slug = ?`);
+
+/** Queued filings one project may hold; past it, new issues are dropped and logged. */
+export const MAX_QUEUED_PER_PROJECT = 50;
 const dequeueStmt = db.prepare(`DELETE FROM pending_filings WHERE issue_id = ? AND project_slug = ?`);
 
-export function queueFiling(f: PendingFiling): void {
+/**
+ * Queue a filing for retry. Re-queuing an issue already in the queue always
+ * works; a new issue is refused (false) once the project holds
+ * MAX_QUEUED_PER_PROJECT, so a flood can't grow the queue without limit.
+ */
+export function queueFiling(f: PendingFiling): boolean {
+  const already = isQueuedStmt.get(f.issue_id, f.project_slug) !== null;
+  if (!already && (countQueuedStmt.get(f.project_slug) as { n: number }).n >= MAX_QUEUED_PER_PROJECT) return false;
   queueStmt.run(f.issue_id, f.project_slug, f.payload, f.attempts, f.next_at, f.last_error);
+  return true;
 }
 
 export function dueFilings(nowMs: number): PendingFiling[] {

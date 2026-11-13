@@ -101,7 +101,8 @@ A claude-hive message only reaches a session that is running. A project can also
 - **The same issue again** (filed before, or `unresolved` after a regression) adds a comment to that task instead of filing a second. The issue-to-task map lives in the bridge's database. A claim row stops two webhooks for one issue from filing twice, and each comment carries a request id, so a webhook Sentry retries posts once. If the task was deleted on the board, the issue files fresh.
 - **Resolved, ignored and other actions, and unknown levels,** file nothing.
 - **Filing never delays the ack to Sentry.** It runs after the response, with a 10-second timeout.
-- **Retries:** a filing that certainly saved nothing (board not running, a 5xx, no token yet) is queued in the database and retried with backoff (1, 2, 4 ... minutes, capped at 6 hours) for about two days, then logged as given up. A create that was sent but got no answer is **not** retried, because the board may have saved it; it is logged as an error and that issue is not filed again.
+- **Retries:** a filing that certainly saved nothing (board not running, a 5xx, no token yet, or over the hourly cap) is queued in the database and retried with backoff (1, 2, 4 ... minutes, capped at 6 hours) for about two days, then logged as given up. Each project's queue holds at most 50 issues; past that, new issues are dropped and logged.
+- **No duplicates:** a create that was sent but got no answer or an unreadable one, or was cut off by a receiver restart, is **not** retried, because the board may hold it. It is logged as an error, and that issue is not filed again until someone checks the board.
 
 Set it up once per board:
 
@@ -115,7 +116,7 @@ Routes are kept only in the local database, never in this repository.
 
 - The receiver only ever sends a board token to a loopback address (`localhost`, `127.0.0.1` or `[::1]`) and refuses redirects, so a mistaken or hostile route cannot hand a token to another host.
 - The Keychain entry's name is derived from the board id, so a route can't point the receiver at some other secret. Every `security` call is killed after 5 seconds, so a locked Keychain can't hang the receiver, and the HTTP server starts before any board work.
-- **Reported error text is untrusted.** For a project whose DSN ships in a web page, anyone can send events with text they choose. That text is quoted in the task body under a line saying so, never put in the title, and each route files at most 10 new tasks an hour.
+- **Reported error text is untrusted.** For a project whose DSN ships in a web page, anyone can send events with text they choose. That text goes in a code block in the task body (so it can't render as headings, links or images) under a line saying it's untrusted, never in the title, and each route files at most 10 new tasks an hour.
 - Board tokens last 7 days. The receiver refreshes each one at startup and then daily, writing the new value back to the Keychain; if that write fails, it keeps the new token in memory and tries the write again at the next refresh. If a token has already expired or been revoked, filings are queued and logged as errors until the board gets a fresh mint.
 
 **Not supported yet:** boards that are not on the same machine as the receiver.
